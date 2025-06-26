@@ -125,6 +125,31 @@ def suggest_trading_strategy(signal):
             "Re-assess after next earnings or major news."
         ]
 
+def explain_signal_vs_forecast(signal, trend, forecast):
+    if forecast is None or forecast.empty:
+        return ""
+    forecast_trajectory = forecast['trendline'].values
+    # If forecasted price is higher at the end than the start, "rising", else "falling"
+    rising = forecast_trajectory[-1] > forecast_trajectory[0]
+    explanation = ""
+    # If bearish/hold but rising
+    if trend == -1 and rising:
+        explanation = (
+            "ℹ️ **Notice:** The long-term technical trend is still bearish, but the model predicts a possible short-term price uptick. "
+            "This could be a 'bear market rally' or mean reversion. Exercise caution if trading against the broader trend."
+        )
+    elif trend == 1 and not rising:
+        explanation = (
+            "ℹ️ **Notice:** The technical trend is bullish, but the model forecasts a possible short-term pullback. "
+            "Markets can have short corrections during uptrends."
+        )
+    elif signal == "Hold" and (rising or not rising):
+        explanation = (
+            "ℹ️ **Notice:** The system sees no strong buy or sell technical signal, but the forecast indicates possible movement. "
+            "This may reflect recent news, volatility, or a lack of clear trend."
+        )
+    return explanation
+
 # ========== UI ==========
 tabs = st.tabs(["Market Information", "Suggestions"])
 
@@ -145,7 +170,8 @@ with tabs[0]:
                 try:
                     st.metric("Current Price", f"${float(df['Close'].iloc[-1]):.2f}")
                     signal = str(df['Signal'].iloc[-1]) if not pd.isnull(df['Signal'].iloc[-1]) else "N/A"
-                    trend = "📈 Bullish" if df['Trend'].iloc[-1] == 1 else "📉 Bearish"
+                    trend_val = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
+                    trend = "📈 Bullish" if trend_val == 1 else "📉 Bearish"
                     st.metric("Signal", signal)
                     st.metric("Trend", trend)
                 except Exception as e:
@@ -174,6 +200,12 @@ with tabs[0]:
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("Forecast data unavailable.")
+
+                # EXPLANATION for difference
+                trend_numeric = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
+                explanation = explain_signal_vs_forecast(signal, trend_numeric, forecast)
+                if explanation:
+                    st.info(explanation)
 
                 # News
                 st.subheader("News Sentiment")
