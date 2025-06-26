@@ -84,7 +84,6 @@ def forecast_prices(df, ticker):
     prophet_df = df[['Close']].copy().reset_index()
     prophet_df.columns = ['ds', 'y']
     prophet_df['ds'] = pd.to_datetime(prophet_df['ds'])
-    # Just a dummy regressor for now
     prophet_df['news_sentiment'] = 0
 
     model = Prophet(daily_seasonality=True)
@@ -129,10 +128,8 @@ def explain_signal_vs_forecast(signal, trend, forecast):
     if forecast is None or forecast.empty:
         return ""
     forecast_trajectory = forecast['trendline'].values
-    # If forecasted price is higher at the end than the start, "rising", else "falling"
     rising = forecast_trajectory[-1] > forecast_trajectory[0]
     explanation = ""
-    # If bearish/hold but rising
     if trend == -1 and rising:
         explanation = (
             "ℹ️ **Notice:** The long-term technical trend is still bearish, but the model predicts a possible short-term price uptick. "
@@ -150,13 +147,20 @@ def explain_signal_vs_forecast(signal, trend, forecast):
         )
     return explanation
 
-# ========== UI ==========
-tabs = st.tabs(["Market Information", "Suggestions"])
+# --- SESSION STATE SETUP ---
+if 'selected_tab' not in st.session_state:
+    st.session_state.selected_tab = 0
+if 'selected_ticker' not in st.session_state:
+    st.session_state.selected_ticker = "AAPL"
+
+tab_names = ["Market Information", "Suggestions"]
+selected_tab = st.radio("Navigation", tab_names, index=st.session_state.selected_tab, horizontal=True, key="main_tabs")
 
 # ========== MARKET INFORMATION TAB ==========
-with tabs[0]:
+if selected_tab == "Market Information":
     st.header("Market Information")
-    ticker = st.text_input("Enter any ticker (Stock, ETF, Crypto, FOREX, Commodity):", "AAPL")
+    ticker = st.text_input("Enter any ticker (Stock, ETF, Crypto, FOREX, Commodity):",
+                           st.session_state.selected_ticker)
     if ticker:
         try:
             df = get_data(ticker)
@@ -177,7 +181,6 @@ with tabs[0]:
                 except Exception as e:
                     st.warning("Could not display key metrics. Data may be missing.")
 
-                # Suggestion logic (Buy, Hold, Sell + Strategy)
                 st.subheader("AI Suggestion")
                 if signal in ["Buy", "Sell"]:
                     st.success(f"**{signal}** recommendation detected.")
@@ -188,7 +191,6 @@ with tabs[0]:
                 for strat in suggest_trading_strategy(signal):
                     st.write("-", strat)
 
-                # Forecast
                 st.subheader("7-Day Price Forecast")
                 forecast = forecast_prices(df.copy(), ticker)
                 if forecast is not None and not forecast.empty and 'trendline' in forecast:
@@ -201,13 +203,11 @@ with tabs[0]:
                 else:
                     st.warning("Forecast data unavailable.")
 
-                # EXPLANATION for difference
                 trend_numeric = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
                 explanation = explain_signal_vs_forecast(signal, trend_numeric, forecast)
                 if explanation:
                     st.info(explanation)
 
-                # News
                 st.subheader("News Sentiment")
                 news_items = get_news(ticker)
                 if news_items:
@@ -219,7 +219,7 @@ with tabs[0]:
             st.error(f"Error: {e}")
 
 # ========== SUGGESTIONS TAB ==========
-with tabs[1]:
+elif selected_tab == "Suggestions":
     st.header("💡 AI Suggested Companies to Watch")
 
     ai_suggestions = {
@@ -265,7 +265,10 @@ with tabs[1]:
         st.subheader(f"🔷 {sector} Sector")
         for ticker in tickers:
             name = get_company_name(ticker)
-            st.markdown(f"**{name} ({ticker})**")
+            if st.button(f"{name} ({ticker})", key=f"btn_{sector}_{ticker}"):
+                st.session_state.selected_ticker = ticker
+                st.session_state.selected_tab = 0
+                st.experimental_rerun()
             news_items = get_news(ticker)
             for n in news_items:
                 st.write("-", n)
