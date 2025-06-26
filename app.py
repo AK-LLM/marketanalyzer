@@ -220,18 +220,45 @@ with tabs[0]:
 
 # ========== SUGGESTIONS TAB ==========
 with tabs[1]:
-    # DO NOT CHANGE THIS TAB AS PER USER REQUEST
     st.header("💡 AI Suggested Companies to Watch")
 
     ai_suggestions = {
-        "AI": ["NVDA", "SMCI", "AMD"],
-        "Tech": ["MSFT", "GOOGL", "AMZN", "AVGO", "TSLA"],
-        "Defense": ["NOC", "LMT", "BWXT", "PLTR"],
-        "Healthcare Tech": ["UNH", "XBI"],
-        "Pharmaceuticals": ["PFE", "MRNA"],
-        "Nuclear": ["SMR", "BWXT"],
-        "Biotech": ["ARKG"],
-        "Clean Energy": ["ICLN"]
+        "AI": [
+            "NVDA", "SMCI", "AMD", "GOOGL", "MSFT", "PLTR", "META", "TSLA", "BIDU", "ADBE", "CRM", "AI", "SNOW"
+        ],
+        "Semiconductors": [
+            "AVGO", "QCOM", "TXN", "TSM", "ASML", "INTC", "STM", "AMAT", "MRVL", "ON", "MCHP", "NXPI", "ADI", "SWKS"
+        ],
+        "Tech": [
+            "AAPL", "AMZN", "ORCL", "SAP", "IBM", "CSCO", "GOOG", "CRM", "ADBE", "SHOP", "UBER", "SQ", "NOW", "ZM"
+        ],
+        "Defense & Aerospace": [
+            "LMT", "NOC", "RTX", "GD", "PLTR", "BA", "HII", "TXT", "BWXT", "TDG"
+        ],
+        "Nuclear & Clean Energy": [
+            "BWXT", "CCJ", "SMR", "U", "CAMECO", "ICLN", "NEE", "DNN", "XOM", "SHEL"
+        ],
+        "Healthcare": [
+            "JNJ", "PFE", "LLY", "UNH", "CVS", "MRK", "ABT", "MDT", "TMO", "DHR", "BMY", "ZBH", "SNY"
+        ],
+        "Healthcare Tech": [
+            "ISRG", "TDOC", "MDT", "DXCM", "CNC", "HCA", "VEEV", "VRTX", "IDXX", "ALGN"
+        ],
+        "Pharmaceuticals & Biotech": [
+            "PFE", "MRNA", "BNTX", "SNY", "AMGN", "REGN", "GILD", "VRTX", "NVO", "AZN", "BIIB", "RHHBY", "GSK"
+        ],
+        "Clean Energy & Renewables": [
+            "ICLN", "NEE", "ENPH", "SEDG", "PLUG", "FSLR", "BE", "RUN", "TSLA", "BLDP"
+        ],
+        "Cloud/Data/Software": [
+            "MSFT", "GOOGL", "AMZN", "ORCL", "SNOW", "DDOG", "ZS", "MDB", "NET", "PANW", "CRWD", "OKTA"
+        ],
+        "Fintech": [
+            "V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU", "FIS", "FISV"
+        ],
+        "MegaCap & Trending": [
+            "AAPL", "AMZN", "GOOG", "MSFT", "META", "TSLA", "NVDA", "BRK.B", "UNH", "V", "WMT"
+        ]
     }
 
     for sector, tickers in ai_suggestions.items():
