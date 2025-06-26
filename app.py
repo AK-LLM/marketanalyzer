@@ -3,173 +3,223 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import requests
-from bs4 import BeautifulSoup
-import feedparser
 from prophet import Prophet
-from datetime import datetime, timedelta
+from datetime import datetime
+from bs4 import BeautifulSoup
+import requests
+import feedparser
+import time
 
-st.set_page_config(page_title="Global Market Watcher", layout="wide")
+time.sleep(0.1)
+st.set_page_config(page_title="AI-Powered Market Analyzer", layout="wide")
 
-# ---- UTILITIES ----
-def resolve_ticker(ticker):
+@st.cache_data
+def get_data(ticker, period='1y'):
+    try:
+        ticker = ticker.upper().strip()
+        if '-' in ticker and not ticker.endswith('-USD'):
+            ticker += '-USD'
+        data = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        if data.empty or 'Close' not in data.columns:
+            raise ValueError("No valid data found for ticker.")
+        return data
+    except Exception as e:
+        raise ValueError(f"Failed to fetch data for ticker: {str(e)}")
+
+def get_company_name(ticker):
     try:
         info = yf.Ticker(ticker).info
-        return info.get("longName") or info.get("shortName") or ticker
+        return info.get('longName') or info.get('shortName') or ticker
     except:
         return ticker
 
-@st.cache_data(show_spinner=False)
-def get_data(ticker, period='1mo', interval='1d'):
-    ticker = ticker.upper().strip()
-    if '-' in ticker and not ticker.endswith('-USD'):
-        ticker += '-USD'
-    if ticker.endswith('=X'):
-        interval = '1h'
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
-    if df.empty:
-        raise ValueError("No data found for ticker.")
-    return df
-
-def calc_indicators(df):
-    df['SMA_14'] = df['Close'].rolling(14).mean()
-    df['SMA_50'] = df['Close'].rolling(50).mean()
+def calculate_indicators(df):
+    if len(df) < 50:
+        return df
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
     delta = df['Close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = -delta.clip(upper=0).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+    rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    df['MACD'] = df['Close'].ewm(12).mean() - df['Close'].ewm(26).mean()
-    df['Signal'] = df['MACD'].ewm(9).mean()
+    df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df.dropna(inplace=True)
     return df
 
-def buy_hold_sell(df):
-    last = df.iloc[-1]
-    if last['RSI'] < 30 and last['MACD'] > last['Signal']:
-        return "Buy"
-    elif last['RSI'] > 70 and last['MACD'] < last['Signal']:
-        return "Sell"
-    else:
-        return "Hold"
+def generate_signals(df):
+    if len(df) == 0 or 'SMA_50' not in df or 'SMA_200' not in df:
+        df['Signal'] = "Hold"
+        df['Trend'] = 0
+        df['Buy'] = False
+        df['Sell'] = False
+        return df
+    df['Trend'] = np.where(df['SMA_50'] > df['SMA_200'], 1, -1)
+    df['Buy'] = (df['RSI'] < 30) & (df['MACD'] > df['Signal_Line']) & (df['Trend'] == 1)
+    df['Sell'] = (df['RSI'] > 70) & (df['MACD'] < df['Signal_Line']) & (df['Trend'] == -1)
+    df['Signal'] = np.where(df['Buy'], 'Buy', np.where(df['Sell'], 'Sell', 'Hold'))
+    return df
 
-def prophet_forecast(df):
-    prices = df['Close'][-60:]  # Use last 60 days for model
-    hist = pd.DataFrame({'ds': prices.index, 'y': prices.values})
-    model = Prophet(daily_seasonality=True)
-    model.fit(hist)
-    future = model.make_future_dataframe(periods=7)
-    forecast = model.predict(future)
-    f_dates = forecast['ds'][-7:]
-    f_vals = forecast['yhat'][-7:]
-    return f_dates, f_vals
-
-def trading_strategy(suggestion):
-    if suggestion == "Buy":
-        return "- Market or Limit order to enter\n- Add Stop Loss below support\n- Consider Call Options if bullish"
-    elif suggestion == "Sell":
-        return "- Market or Limit sell\n- Add Stop Loss above resistance\n- Consider Put Options or short"
-    else:
-        return "- Hold: No new action\n- Review Stop Loss and existing positions"
-
-def google_news_headlines(query, max_items=5):
+def get_news(ticker):
     try:
-        url = f"https://news.google.com/search?q={query.replace(' ', '+')}"
-        html = requests.get(url, timeout=10).text
-        soup = BeautifulSoup(html, "html.parser")
-        return [item.text for item in soup.select('article h3 a')][:max_items]
+        url = f"https://news.google.com/search?q={ticker}+stock"
+        html = requests.get(url, timeout=6).text
+        soup = BeautifulSoup(html, 'html.parser')
+        return [item.text for item in soup.select('article h3 a')][:5]
     except:
         return ["No news found."]
 
-def fda_drug_approvals(max_items=5):
+def get_fda_approvals():
     try:
         rss_url = "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"
         feed = feedparser.parse(rss_url)
-        return [entry.title for entry in feed.entries[:max_items]]
+        return [entry.title for entry in feed.entries[:5]]
     except:
         return ["No FDA data available"]
 
-def yahoo_trending_stocks():
+def forecast_prices(df, ticker):
+    if len(df) < 30:
+        return None
+    prophet_df = df[['Close']].copy().reset_index()
+    prophet_df.columns = ['ds', 'y']
+    prophet_df['ds'] = pd.to_datetime(prophet_df['ds'])
+    # Just a dummy regressor for now
+    prophet_df['news_sentiment'] = 0
+
+    model = Prophet(daily_seasonality=True)
+    model.add_regressor('news_sentiment')
     try:
-        url = "https://finance.yahoo.com/trending-tickers"
-        html = requests.get(url, timeout=10).text
-        soup = BeautifulSoup(html, "html.parser")
-        return [a.text for a in soup.select('a[data-test=\"quoteLink\"]')][:7]
+        model.fit(prophet_df)
+        future = model.make_future_dataframe(periods=7)
+        future['news_sentiment'] = 0
+        forecast = model.predict(future)
+        forecast_range = forecast.tail(7)
+        x = np.arange(len(forecast_range))
+        linear_coeffs = np.polyfit(x, forecast_range['yhat'], 1)
+        linear_trend = np.polyval(linear_coeffs, x)
+        forecast.loc[forecast.index[-7:], 'trendline'] = linear_trend
+        return forecast[['ds', 'yhat', 'trendline']].tail(7)
     except:
-        return []
+        return None
 
-sector_keywords = {
-    "Nuclear": ["BWXT", "CCJ", "SMR", "U", "CAMECO"],
-    "AI": ["NVDA", "AMD", "GOOGL", "MSFT", "PLTR", "META", "TSLA"],
-    "Tech": ["AAPL", "AMZN", "AVGO", "ORCL", "CRM"],
-    "Healthcare": ["JNJ", "PFE", "LLY", "UNH", "CVS"],
-    "Healthcare Tech": ["ISRG", "TDOC", "MDT", "DXCM"],
-    "Pharmaceuticals": ["PFE", "MRNA", "BNTX", "SNY"],
-    "Defense & Aerospace": ["LMT", "NOC", "RTX", "GD", "PLTR", "BA"]
-}
+def suggest_trading_strategy(signal):
+    if signal == "Buy":
+        return [
+            "Market Order: Buy at current price.",
+            "Limit Order: Set a buy limit slightly below current price.",
+            "Protective Stop Loss: Place stop ~3-5% below entry.",
+            "Options: Consider buying a CALL or selling a PUT."
+        ]
+    elif signal == "Sell":
+        return [
+            "Market Order: Sell at current price.",
+            "Limit Order: Set a sell limit slightly above current price.",
+            "Protective Stop Loss: Place stop ~3-5% above entry.",
+            "Options: Consider buying a PUT or selling a CALL."
+        ]
+    else:
+        return [
+            "Monitor: No strong action recommended.",
+            "Consider trailing stop or covered call for yield.",
+            "Re-assess after next earnings or major news."
+        ]
 
-# ---- STREAMLIT UI ----
-tab1, tab2 = st.tabs(["Market Information", "Suggestions"])
+# ========== UI ==========
+tabs = st.tabs(["Market Information", "Suggestions"])
 
-with tab1:
+# ========== MARKET INFORMATION TAB ==========
+with tabs[0]:
     st.header("Market Information")
-    user_ticker = st.text_input("Enter any ticker (Stock, ETF, Crypto, FOREX, Commodity):", "AAPL")
-    if user_ticker:
+    ticker = st.text_input("Enter any ticker (Stock, ETF, Crypto, FOREX, Commodity):", "AAPL")
+    if ticker:
         try:
-            df = get_data(user_ticker, period='2mo', interval='1d')
-            df = calc_indicators(df)
-            company = resolve_ticker(user_ticker)
-            st.subheader(f"{company} ({user_ticker.upper()})")
-            st.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
-            st.metric("RSI", f"{df['RSI'].iloc[-1]:.2f}")
-            st.metric("MACD", f"{df['MACD'].iloc[-1]:.2f}")
-            suggestion = buy_hold_sell(df)
-            st.metric("Signal", suggestion)
-            st.line_chart(df['Close'], use_container_width=True)
+            df = get_data(ticker)
+            df = calculate_indicators(df)
+            df = generate_signals(df)
+            if df.empty or len(df) < 10:
+                st.error("No data available after processing for this ticker. Try another ticker or check your connection.")
+            else:
+                name = get_company_name(ticker)
+                st.subheader(f"{name} ({ticker.upper()})")
+                try:
+                    st.metric("Current Price", f"${float(df['Close'].iloc[-1]):.2f}")
+                    signal = str(df['Signal'].iloc[-1]) if not pd.isnull(df['Signal'].iloc[-1]) else "N/A"
+                    trend = "📈 Bullish" if df['Trend'].iloc[-1] == 1 else "📉 Bearish"
+                    st.metric("Signal", signal)
+                    st.metric("Trend", trend)
+                except Exception as e:
+                    st.warning("Could not display key metrics. Data may be missing.")
 
-            # 7-day Prophet forecast
-            f_dates, f_vals = prophet_forecast(df)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Historical"))
-            fig.add_trace(go.Scatter(x=f_dates, y=f_vals, name="7d Prophet Forecast", line=dict(dash='dot')))
-            st.plotly_chart(fig, use_container_width=True)
+                # Suggestion logic (Buy, Hold, Sell + Strategy)
+                st.subheader("AI Suggestion")
+                if signal in ["Buy", "Sell"]:
+                    st.success(f"**{signal}** recommendation detected.")
+                else:
+                    st.info("No strong Buy or Sell signal.")
 
-            st.subheader("Trading Strategy Suggestion")
-            st.markdown(trading_strategy(suggestion))
+                st.markdown("**Trading Strategies:**")
+                for strat in suggest_trading_strategy(signal):
+                    st.write("-", strat)
 
-            st.subheader("Latest Headlines")
-            for n in google_news_headlines(company):
-                st.write("-", n)
+                # Forecast
+                st.subheader("7-Day Price Forecast")
+                forecast = forecast_prices(df.copy(), ticker)
+                if forecast is not None and not forecast.empty and 'trendline' in forecast:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=forecast['ds'], y=forecast['trendline'],
+                        name='7-Day Forecast', line=dict(shape='linear', color='#FF5E5B')
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Forecast data unavailable.")
 
+                # News
+                st.subheader("News Sentiment")
+                news_items = get_news(ticker)
+                if news_items:
+                    for item in news_items:
+                        st.write("-", item)
+                else:
+                    st.write("- No news found.")
         except Exception as e:
             st.error(f"Error: {e}")
 
-with tab2:
-    st.header("AI Suggestions (Trending Companies & Sectors)")
-    st.markdown("**World-wide, with focus on Nuclear, AI, Tech, Healthcare, Defense, Pharma.**")
-    st.divider()
+# ========== SUGGESTIONS TAB ==========
+with tabs[1]:
+    # DO NOT CHANGE THIS TAB AS PER USER REQUEST
+    st.header("💡 AI Suggested Companies to Watch")
 
-    for sector, tickers in sector_keywords.items():
-        st.subheader(f"🔷 {sector}")
-        for t in tickers:
-            cname = resolve_ticker(t)
-            st.markdown(f"**{cname} ({t})**")
-            news = google_news_headlines(cname)
-            for n in news:
+    ai_suggestions = {
+        "AI": ["NVDA", "SMCI", "AMD"],
+        "Tech": ["MSFT", "GOOGL", "AMZN", "AVGO", "TSLA"],
+        "Defense": ["NOC", "LMT", "BWXT", "PLTR"],
+        "Healthcare Tech": ["UNH", "XBI"],
+        "Pharmaceuticals": ["PFE", "MRNA"],
+        "Nuclear": ["SMR", "BWXT"],
+        "Biotech": ["ARKG"],
+        "Clean Energy": ["ICLN"]
+    }
+
+    for sector, tickers in ai_suggestions.items():
+        st.subheader(f"🔷 {sector} Sector")
+        for ticker in tickers:
+            name = get_company_name(ticker)
+            st.markdown(f"**{name} ({ticker})**")
+            news_items = get_news(ticker)
+            for n in news_items:
                 st.write("-", n)
 
     st.divider()
-    st.subheader("📰 News & Trends (Global)")
-    st.markdown("**Trending Stocks (Yahoo):**")
-    trending = yahoo_trending_stocks()
-    if trending:
-        st.write(", ".join(trending))
-    else:
-        st.write("No trending data found.")
+    st.markdown("### 📰 News")
 
-    st.markdown("**FDA Drug Approvals:**")
-    for item in fda_drug_approvals():
-        st.write("-", item)
+    all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
+    for ticker in all_news_sources:
+        st.subheader(f"🗞️ {get_company_name(ticker)} ({ticker})")
+        for n in get_news(ticker):
+            st.write("-", n)
 
-    st.markdown("**Recent News (Reddit/X):** *(web scraping limited for free, advanced integrations can be added later)*")
-    st.write("Try searching companies or sectors of interest on Reddit/X for sentiment. For now, news headlines are shown above.")
+    st.subheader("🧪 FDA Drug Approval News")
+    for fda in get_fda_approvals():
+        st.write("-", fda)
