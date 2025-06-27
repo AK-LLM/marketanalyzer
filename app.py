@@ -165,6 +165,112 @@ def explain_signal_vs_forecast(signal, trend, forecast):
         )
     return explanation
 
+# ----- New Feature Functions -----
+def get_fundamentals(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        keys = ["sector", "industry", "marketCap", "trailingPE", "forwardPE", "dividendYield", "beta", "profitMargins", "pegRatio"]
+        fundamentals = {k: info.get(k, 'N/A') for k in keys}
+        return fundamentals
+    except:
+        return {}
+
+def get_earnings_events(ticker):
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        cal = ticker_obj.calendar
+        splits = ticker_obj.splits
+        dividends = ticker_obj.dividends
+        events = {}
+        if not cal.empty:
+            for col in cal.columns:
+                events[col] = cal[col][0]
+        if not splits.empty:
+            events["Last Split"] = splits.index[-1].strftime("%Y-%m-%d") + f" ({splits[-1]}:1)"
+        if not dividends.empty:
+            events["Last Dividend"] = dividends.index[-1].strftime("%Y-%m-%d") + f" (${dividends[-1]:.2f})"
+        return events
+    except:
+        return {}
+
+def get_volatility(df):
+    try:
+        df = df.copy()
+        df['Return'] = df['Close'].pct_change()
+        std_30d = df['Return'].rolling(window=30).std().iloc[-1]
+        df['H-L'] = df['High'] - df['Low']
+        df['ATR'] = df['H-L'].rolling(window=14).mean()
+        atr_14d = df['ATR'].iloc[-1]
+        return std_30d, atr_14d
+    except:
+        return None, None
+
+def get_signal_history(df):
+    try:
+        # Get last 10 buy/sell signals for plotting
+        recent = df.tail(100).copy()
+        buys = recent[recent['Buy']]
+        sells = recent[recent['Sell']]
+        return buys, sells
+    except:
+        return pd.DataFrame(), pd.DataFrame()
+
+def get_peers(ticker):
+    # Simple peer logic: by sector or industry, otherwise use similar large caps
+    try:
+        info = yf.Ticker(ticker).info
+        sector = info.get('sector')
+        industry = info.get('industry')
+        candidates = {
+            'Tech': ['AAPL', 'MSFT', 'GOOGL'],
+            'Semiconductors': ['NVDA', 'AMD', 'AVGO'],
+            'Healthcare': ['JNJ', 'PFE', 'MRK'],
+            'Finance': ['JPM', 'BAC', 'GS'],
+            'Consumer': ['PG', 'KO', 'PEP']
+        }
+        if sector:
+            for k in candidates:
+                if k in sector:
+                    return [t for t in candidates[k] if t != ticker][:2]
+        return ['AAPL', 'MSFT'] if ticker != 'AAPL' else ['MSFT', 'GOOGL']
+    except:
+        return ['AAPL', 'MSFT']
+
+def get_peer_comparison(ticker, peers, period='1y'):
+    data = {}
+    tickers = [ticker] + peers
+    for t in tickers:
+        try:
+            d = yf.download(t, period=period, auto_adjust=True, progress=False)
+            data[t] = d['Close']
+        except:
+            continue
+    return pd.DataFrame(data)
+
+def get_analyst_rating(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        rec = info.get('recommendationKey', 'N/A').capitalize()
+        target = info.get('targetMeanPrice', 'N/A')
+        return rec, target
+    except:
+        return "N/A", "N/A"
+
+def get_news_sentiment(ticker):
+    try:
+        from textblob import TextBlob
+        headlines = get_news(ticker)
+        polarity = [TextBlob(h).sentiment.polarity for h in headlines]
+        if polarity:
+            pos = sum(1 for p in polarity if p > 0.1)
+            neg = sum(1 for p in polarity if p < -0.1)
+            neu = len(polarity) - pos - neg
+            return {"positive": pos, "negative": neg, "neutral": neu}
+        else:
+            return {"positive": 0, "negative": 0, "neutral": 0}
+    except:
+        return {}
+
 # --- SESSION STATE SETUP ---
 if 'selected_tab' not in st.session_state:
     st.session_state.selected_tab = 0
@@ -199,6 +305,92 @@ if selected_tab == "Market Information":
                 except Exception as e:
                     st.warning("Could not display key metrics. Data may be missing.")
 
+                # (1) Company Fundamentals
+                try:
+                    fundamentals = get_fundamentals(ticker)
+                    if fundamentals:
+                        st.subheader("Company Fundamentals")
+                        st.write(f"**Sector:** {fundamentals.get('sector')}")
+                        st.write(f"**Industry:** {fundamentals.get('industry')}")
+                        st.write(f"**Market Cap:** {fundamentals.get('marketCap'):,}")
+                        st.write(f"**P/E Ratio:** {fundamentals.get('trailingPE')}")
+                        st.write(f"**Dividend Yield:** {fundamentals.get('dividendYield')}")
+                        st.write(f"**Profit Margin:** {fundamentals.get('profitMargins')}")
+                except:
+                    pass
+
+                # (2) Earnings/Events
+                try:
+                    st.subheader("Key Events")
+                    events = get_earnings_events(ticker)
+                    if events:
+                        for k, v in events.items():
+                            st.write(f"{k}: {v}")
+                except:
+                    pass
+
+                # (3) Volatility/ATR
+                try:
+                    st.subheader("Volatility")
+                    std_30d, atr_14d = get_volatility(df)
+                    if std_30d and atr_14d:
+                        st.write(f"30d Std Dev: {std_30d:.4f}")
+                        st.write(f"14d ATR: {atr_14d:.2f}")
+                except:
+                    pass
+
+                # (4) Backtest Signal History on Chart
+                try:
+                    st.subheader("Buy/Sell Signal Chart (last 100 days)")
+                    buys, sells = get_signal_history(df)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close', line=dict(color='blue')))
+                    fig.add_trace(go.Scatter(x=df.index, y=df.get('SMA_50', pd.Series()), name='50 SMA', line=dict(color='orange', dash='dash')))
+                    fig.add_trace(go.Scatter(x=df.index, y=df.get('SMA_200', pd.Series()), name='200 SMA', line=dict(color='green', dash='dot')))
+                    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(color='green', size=10, symbol='triangle-up'), name='Buy Signal'))
+                    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(color='red', size=10, symbol='triangle-down'), name='Sell Signal'))
+                    st.plotly_chart(fig, use_container_width=True)
+                except:
+                    pass
+
+                # (5) Peer/Industry Comparison
+                try:
+                    st.subheader("Peer Comparison (1Y Total Return)")
+                    peers = get_peers(ticker)
+                    df_peers = get_peer_comparison(ticker, peers)
+                    if not df_peers.empty:
+                        returns = (df_peers / df_peers.iloc[0] - 1) * 100
+                        st.line_chart(returns)
+                        st.write("Peers:", ", ".join(peers))
+                except:
+                    pass
+
+                # (6) Simulated "Add to Watchlist"
+                try:
+                    st.subheader("Watchlist Export (simulated)")
+                    if st.button("Copy ticker to clipboard (manual)"):
+                        st.code(ticker)
+                except:
+                    pass
+
+                # (7) Analyst Rating/Target
+                try:
+                    st.subheader("Analyst Consensus")
+                    rec, target = get_analyst_rating(ticker)
+                    st.write(f"Consensus: {rec}")
+                    st.write(f"Avg. Target: ${target}")
+                except:
+                    pass
+
+                # (8) News Sentiment Scoring
+                try:
+                    st.subheader("News Sentiment Analysis")
+                    from textblob import TextBlob
+                    sentiment = get_news_sentiment(ticker)
+                    st.write(sentiment)
+                except:
+                    pass
+
                 st.subheader("AI Suggestion")
                 if signal in ["Buy", "Sell"]:
                     st.success(f"**{signal}** recommendation detected.")
@@ -212,12 +404,12 @@ if selected_tab == "Market Information":
                 st.subheader("7-Day Price Forecast")
                 forecast = forecast_prices(df.copy(), ticker)
                 if forecast is not None and not forecast.empty and 'trendline' in forecast:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(
                         x=forecast['ds'], y=forecast['trendline'],
                         name='7-Day Forecast', line=dict(shape='linear', color='#FF5E5B')
                     ))
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig2, use_container_width=True)
                 else:
                     st.warning("Forecast data unavailable.")
 
@@ -238,6 +430,7 @@ if selected_tab == "Market Information":
 
 # ========== SUGGESTIONS TAB ==========
 elif selected_tab == "Suggestions":
+    # ... your previously frozen suggestions tab code goes here, unchanged ...
     st.header("💡 AI Suggested Companies to Watch")
 
     ai_suggestions = {
@@ -279,7 +472,6 @@ elif selected_tab == "Suggestions":
         ]
     }
 
-    # Map each sector to search keywords for sector trend news
     sector_keywords_map = {
         "AI": ["artificial", "intelligence", "AI"],
         "Semiconductors": ["semiconductor", "chip", "microchip"],
@@ -297,15 +489,12 @@ elif selected_tab == "Suggestions":
 
     for sector, tickers in ai_suggestions.items():
         st.subheader(f"🔷 {sector} Sector")
-        # Ticker suggestions
         for ticker in tickers:
             name = get_company_name(ticker)
             st.markdown(f"**{name} ({ticker})**")
             news_items = get_news(ticker)
             for n in news_items:
                 st.write("-", n)
-
-        # Sector trend/breaking news headlines
         st.markdown("*Sector-wide breaking/trend news:*")
         kw = sector_keywords_map.get(sector, [sector])
         sector_news = get_sector_news(kw)
@@ -314,19 +503,14 @@ elif selected_tab == "Suggestions":
 
     st.divider()
     st.markdown("### 📰 News")
-
-    # Google News by ticker (as before)
     all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
     for ticker in all_news_sources:
         st.subheader(f"🗞️ {get_company_name(ticker)} ({ticker})")
         for n in get_news(ticker):
             st.write("-", n)
-
-    # Yahoo Finance RSS headlines (NEW)
     st.subheader("🌐 Yahoo Finance Top Stories")
     for ynews in get_yahoo_rss_headlines():
         st.write("-", ynews)
-
     st.subheader("🧪 FDA Drug Approval News")
     for fda in get_fda_approvals():
         st.write("-", fda)
