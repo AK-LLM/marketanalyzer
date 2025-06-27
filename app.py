@@ -13,6 +13,23 @@ import time
 time.sleep(0.1)
 st.set_page_config(page_title="AI-Powered Market Analyzer", layout="wide")
 
+# ===== Helpers =====
+def human_readable(val):
+    try:
+        val = float(val)
+        if abs(val) >= 1e12:
+            return f"${val/1e12:.2f}T"
+        elif abs(val) >= 1e9:
+            return f"${val/1e9:.2f}B"
+        elif abs(val) >= 1e6:
+            return f"${val/1e6:.2f}M"
+        elif abs(val) >= 1e3:
+            return f"${val/1e3:.2f}K"
+        else:
+            return f"${val:.2f}"
+    except:
+        return str(val)
+
 @st.cache_data
 def get_data(ticker, period='1y'):
     try:
@@ -32,6 +49,31 @@ def get_company_name(ticker):
         return info.get('longName') or info.get('shortName') or ticker
     except:
         return ticker
+
+def get_financials_timeseries(ticker):
+    try:
+        fin = yf.Ticker(ticker).financials
+        if fin.empty:
+            return None
+        fin = fin.T
+        keys = {
+            'Revenue': ['Total Revenue', 'Revenue'],
+            'Gross Profit': ['Gross Profit'],
+            'Net Income': ['Net Income', 'Net Income Applicable To Common Shares'],
+            'EBITDA': ['EBITDA']
+        }
+        data = {}
+        for k, search_keys in keys.items():
+            for col in search_keys:
+                if col in fin.columns:
+                    data[k] = fin[col]
+                    break
+        df = pd.DataFrame(data)
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        return df
+    except:
+        return None
 
 def calculate_indicators(df):
     if len(df) < 50:
@@ -174,173 +216,6 @@ def get_fundamentals(ticker):
     except:
         return {}
 
-def get_earnings_events(ticker):
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        cal = ticker_obj.calendar
-        splits = ticker_obj.splits
-        dividends = ticker_obj.dividends
-        events = {}
-        if not cal.empty:
-            for col in cal.columns:
-                events[col] = cal[col][0]
-        if not splits.empty:
-            events["Last Split"] = splits.index[-1].strftime("%Y-%m-%d") + f" ({splits[-1]}:1)"
-        if not dividends.empty:
-            events["Last Dividend"] = dividends.index[-1].strftime("%Y-%m-%d") + f" (${dividends[-1]:.2f})"
-        return events
-    except:
-        return {}
-
-def get_volatility(df):
-    try:
-        df = df.copy()
-        df['Return'] = df['Close'].pct_change()
-        std_30d = df['Return'].rolling(window=30).std().iloc[-1]
-        df['H-L'] = df['High'] - df['Low']
-        df['ATR'] = df['H-L'].rolling(window=14).mean()
-        atr_14d = df['ATR'].iloc[-1]
-        return std_30d, atr_14d
-    except:
-        return None, None
-
-def get_signal_history(df):
-    try:
-        recent = df.tail(100).copy()
-        buys = recent[recent['Buy']]
-        sells = recent[recent['Sell']]
-        return buys, sells
-    except:
-        return pd.DataFrame(), pd.DataFrame()
-
-def get_peers(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        sector = info.get('sector')
-        industry = info.get('industry')
-        candidates = {
-            'Tech': ['AAPL', 'MSFT', 'GOOGL'],
-            'Semiconductors': ['NVDA', 'AMD', 'AVGO'],
-            'Healthcare': ['JNJ', 'PFE', 'MRK'],
-            'Finance': ['JPM', 'BAC', 'GS'],
-            'Consumer': ['PG', 'KO', 'PEP']
-        }
-        if sector:
-            for k in candidates:
-                if k in sector:
-                    return [t for t in candidates[k] if t != ticker][:2]
-        return ['AAPL', 'MSFT'] if ticker != 'AAPL' else ['MSFT', 'GOOGL']
-    except:
-        return ['AAPL', 'MSFT']
-
-def get_peer_comparison(ticker, peers, period='1y'):
-    data = {}
-    tickers = [ticker] + peers
-    for t in tickers:
-        try:
-            d = yf.download(t, period=period, auto_adjust=True, progress=False)
-            data[t] = d['Close']
-        except:
-            continue
-    return pd.DataFrame(data)
-
-def get_analyst_rating(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        rec = info.get('recommendationKey', 'N/A').capitalize()
-        target = info.get('targetMeanPrice', 'N/A')
-        return rec, target
-    except:
-        return "N/A", "N/A"
-
-def get_news_sentiment(ticker):
-    try:
-        from textblob import TextBlob
-        headlines = get_news(ticker)
-        polarity = [TextBlob(h).sentiment.polarity for h in headlines]
-        if polarity:
-            pos = sum(1 for p in polarity if p > 0.1)
-            neg = sum(1 for p in polarity if p < -0.1)
-            neu = len(polarity) - pos - neg
-            return {"positive": pos, "negative": neg, "neutral": neu}
-        else:
-            return {"positive": 0, "negative": 0, "neutral": 0}
-    except:
-        return {}
-
-def _format_market_cap(val):
-    try:
-        val = float(val)
-        if val >= 1e12:
-            return f"{val/1e12:.2f}T"
-        elif val >= 1e9:
-            return f"{val/1e9:.2f}B"
-        elif val >= 1e6:
-            return f"{val/1e6:.2f}M"
-        elif val >= 1e3:
-            return f"{val/1e3:.2f}K"
-        else:
-            return str(int(val))
-    except:
-        return "N/A"
-
-def _format_pe(val):
-    try:
-        if val == 'N/A' or val is None:
-            return "N/A"
-        return f"{float(val):.3f}"
-    except:
-        return "N/A"
-
-def _format_profit_margin(val):
-    try:
-        if val == 'N/A' or val is None:
-            return "N/A"
-        return f"{float(val)*100:.2f}%"
-    except:
-        return "N/A"
-
-def _format_human_readable(val):
-    try:
-        v = float(val)
-        if abs(v) >= 1e12:
-            return f"${v/1e12:.2f}T"
-        elif abs(v) >= 1e9:
-            return f"${v/1e9:.2f}B"
-        elif abs(v) >= 1e6:
-            return f"${v/1e6:.2f}M"
-        elif abs(v) >= 1e3:
-            return f"${v/1e3:.2f}K"
-        else:
-            return f"${int(v)}"
-    except:
-        return "N/A"
-
-def get_financials_timeseries(ticker):
-    try:
-        fin = yf.Ticker(ticker).financials
-        if fin.empty:
-            return None
-        fin = fin.T
-        keys = {
-            'Revenue': ['Total Revenue', 'Revenue'],
-            'Gross Profit': ['Gross Profit'],
-            'Net Income': ['Net Income', 'Net Income Applicable To Common Shares'],
-            'EBITDA': ['EBITDA']
-        }
-        data = {}
-        for k, search_keys in keys.items():
-            for col in search_keys:
-                if col in fin.columns:
-                    data[k] = fin[col]
-                    break
-        df = pd.DataFrame(data)
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
-        return df
-    except:
-        return None
-
 # --- SESSION STATE SETUP ---
 if 'selected_tab' not in st.session_state:
     st.session_state.selected_tab = 0
@@ -365,147 +240,69 @@ if selected_tab == "Market Information":
             else:
                 name = get_company_name(ticker)
                 st.subheader(f"{name} ({ticker.upper()})")
-                try:
-                    st.metric("Current Price", f"${float(df['Close'].iloc[-1]):.2f}")
-                    signal = str(df['Signal'].iloc[-1]) if not pd.isnull(df['Signal'].iloc[-1]) else "N/A"
-                    trend_val = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
-                    trend = "📈 Bullish" if trend_val == 1 else "📉 Bearish"
-                    st.metric("Signal", signal)
-                    st.metric("Trend", trend)
-                except Exception as e:
-                    st.warning("Could not display key metrics. Data may be missing.")
+                st.metric("Current Price", f"${float(df['Close'].iloc[-1]):.2f}")
+                signal = str(df['Signal'].iloc[-1]) if not pd.isnull(df['Signal'].iloc[-1]) else "N/A"
+                trend_val = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
+                trend = "📈 Bullish" if trend_val == 1 else "📉 Bearish"
+                st.metric("Signal", signal)
+                st.metric("Trend", trend)
 
-                # (1) Company Fundamentals
-                try:
-                    fundamentals = get_fundamentals(ticker)
-                    if fundamentals:
-                        st.subheader("Company Fundamentals")
-                        st.write(f"**Sector:** {fundamentals.get('sector')}")
-                        st.write(f"**Industry:** {fundamentals.get('industry')}")
-                        st.write(f"**Market Cap:** {_format_market_cap(fundamentals.get('marketCap'))}")
-                        st.write(f"**P/E Ratio:** {_format_pe(fundamentals.get('trailingPE'))}")
-                        st.write(f"**Dividend Yield:** {fundamentals.get('dividendYield')}")
-                        st.write(f"**Profit Margin:** {_format_profit_margin(fundamentals.get('profitMargins'))}")
-                except:
-                    pass
+                # Company Fundamentals
+                fundamentals = get_fundamentals(ticker)
+                if fundamentals:
+                    st.subheader("Company Fundamentals")
+                    st.write(f"**Sector:** {fundamentals.get('sector')}")
+                    st.write(f"**Industry:** {fundamentals.get('industry')}")
+                    st.write(f"**Market Cap:** {human_readable(fundamentals.get('marketCap'))}")
+                    st.write(f"**P/E Ratio:** {f'{float(fundamentals.get('trailingPE')):.3f}' if fundamentals.get('trailingPE') not in ['N/A', None] else 'N/A'}")
+                    st.write(f"**Profit Margin:** {f'{float(fundamentals.get('profitMargins'))*100:.2f}%' if fundamentals.get('profitMargins') not in ['N/A', None] else 'N/A'}")
 
-                # (NEW) Financial Performance Chart (Lines, Formatted)
-                try:
-                    st.subheader("Financial Performance (Annual)")
-                    fin_df = get_financials_timeseries(ticker)
-                    if fin_df is not None and not fin_df.empty:
-                        year_range = list(fin_df.index.year)
-                        year_min, year_max = min(year_range), max(year_range)
-                        year_selected = st.slider("Year Range", year_min, year_max, (year_min, year_max), key="year_slider2")
-                        filtered = fin_df[(fin_df.index.year >= year_selected[0]) & (fin_df.index.year <= year_selected[1])]
+                # ==== PATCHED SECTION BELOW ====
+                st.subheader("Financial Performance (Annual)")
 
-                        fig = go.Figure()
-                        for col in filtered.columns:
-                            fig.add_trace(
-                                go.Scatter(
-                                    x=filtered.index.year,
-                                    y=filtered[col],
-                                    mode='lines+markers',
-                                    name=col,
-                                    text=[_format_human_readable(v) for v in filtered[col]],
-                                    hovertemplate=f"<b>%{{x}}</b><br>{col}: %{{text}}<extra></extra>"
-                                )
-                            )
-                        fig.update_layout(
-                            xaxis_title="Year",
-                            yaxis_title="Value (USD)",
-                            legend_title="Metric",
-                            hovermode="x unified",
-                            template="plotly_white"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No financial data available.")
-                except Exception as e:
-                    st.warning(f"Financial performance chart error: {e}")
+                fin_df = get_financials_timeseries(ticker)
+                if fin_df is not None and not fin_df.empty:
+                    desired_cols = ["Revenue", "Gross Profit", "EBITDA", "Net Income"]
+                    available_cols = [c for c in desired_cols if c in fin_df.columns]
+                    fin_df = fin_df[available_cols]
+                    metric = st.selectbox("Metric", ["All"] + available_cols, key="metric_select_patch")
+                    year_range = fin_df.index.year.tolist()
+                    min_year, max_year = min(year_range), max(year_range)
+                    year_selected = st.slider("Year Range", min_value=min_year, max_value=max_year, value=(min_year, max_year), key="fin_year_slider_patch")
+                    plot_df = fin_df.loc[(fin_df.index.year >= year_selected[0]) & (fin_df.index.year <= year_selected[1])]
 
-                # (2) Earnings/Events
-                try:
-                    st.subheader("Key Events")
-                    events = get_earnings_events(ticker)
-                    if events:
-                        for k, v in events.items():
-                            st.write(f"{k}: {v}")
-                except:
-                    pass
-
-                # (3) Volatility/ATR
-                try:
-                    st.subheader("Volatility")
-                    std_30d, atr_14d = get_volatility(df)
-                    if std_30d and atr_14d:
-                        st.write(f"30d Std Dev: {std_30d:.4f}")
-                        st.write(f"14d ATR: {atr_14d:.2f}")
-                except:
-                    pass
-
-                # (4) Backtest Signal History on Chart
-                try:
-                    st.subheader("Buy/Sell Signal Chart (last 100 days)")
-                    buys, sells = get_signal_history(df)
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='Close', line=dict(color='blue')))
-                    fig.add_trace(go.Scatter(x=df.index, y=df.get('SMA_50', pd.Series()), name='50 SMA', line=dict(color='orange', dash='dash')))
-                    fig.add_trace(go.Scatter(x=df.index, y=df.get('SMA_200', pd.Series()), name='200 SMA', line=dict(color='green', dash='dot')))
-                    fig.add_trace(go.Scatter(x=buys.index, y=buys['Close'], mode='markers', marker=dict(color='green', size=10, symbol='triangle-up'), name='Buy Signal'))
-                    fig.add_trace(go.Scatter(x=sells.index, y=sells['Close'], mode='markers', marker=dict(color='red', size=10, symbol='triangle-down'), name='Sell Signal'))
+                    metrics = available_cols if metric == "All" else [metric]
+                    color_map = {
+                        "Revenue": "firebrick",
+                        "Gross Profit": "royalblue",
+                        "EBITDA": "seagreen",
+                        "Net Income": "darkorange"
+                    }
+                    for m in metrics:
+                        fig.add_trace(go.Scatter(
+                            x=plot_df.index.strftime("%Y"),
+                            y=plot_df[m],
+                            mode='lines+markers',
+                            name=m,
+                            line=dict(color=color_map.get(m, "gray"), width=3),
+                            text=[human_readable(v) for v in plot_df[m]],
+                            hovertemplate=f"<b>%{{x}}</b><br>{m}: %{{text}}"
+                        ))
+                    fig.update_layout(
+                        xaxis_title="Year",
+                        yaxis_title="Value (USD)",
+                        legend_title="Metric",
+                        hovermode="x unified",
+                        template="plotly_white"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
-                except:
-                    pass
-
-                # (5) Peer/Industry Comparison
-                try:
-                    st.subheader("Peer Comparison (1Y Total Return)")
-                    peers = get_peers(ticker)
-                    df_peers = get_peer_comparison(ticker, peers)
-                    if not df_peers.empty:
-                        returns = (df_peers / df_peers.iloc[0] - 1) * 100
-                        st.line_chart(returns)
-                        st.write("Peers:", ", ".join(peers))
-                except:
-                    pass
-
-                # (6) Simulated "Add to Watchlist"
-                try:
-                    st.subheader("Watchlist Export (simulated)")
-                    if st.button("Copy ticker to clipboard (manual)"):
-                        st.code(ticker)
-                except:
-                    pass
-
-                # (7) Analyst Rating/Target
-                try:
-                    st.subheader("Analyst Consensus")
-                    rec, target = get_analyst_rating(ticker)
-                    st.write(f"Consensus: {rec}")
-                    st.write(f"Avg. Target: ${target}")
-                except:
-                    pass
-
-                # (8) News Sentiment Scoring
-                try:
-                    st.subheader("News Sentiment Analysis")
-                    from textblob import TextBlob
-                    sentiment = get_news_sentiment(ticker)
-                    st.write(sentiment)
-                except:
-                    pass
-
-                st.subheader("AI Suggestion")
-                if signal in ["Buy", "Sell"]:
-                    st.success(f"**{signal}** recommendation detected.")
                 else:
-                    st.info("No strong Buy or Sell signal.")
+                    st.info("No financial data available.")
 
-                st.markdown("**Trading Strategies:**")
-                for strat in suggest_trading_strategy(signal):
-                    st.write("-", strat)
+                # ==== END PATCH ====
 
+                # 7-Day Price Forecast (Line)
                 st.subheader("7-Day Price Forecast")
                 forecast = forecast_prices(df.copy(), ticker)
                 if forecast is not None and not forecast.empty and 'trendline' in forecast:
@@ -518,11 +315,24 @@ if selected_tab == "Market Information":
                 else:
                     st.warning("Forecast data unavailable.")
 
+                # Buy/Hold/Sell suggestion
+                st.subheader("AI Suggestion")
+                if signal in ["Buy", "Sell"]:
+                    st.success(f"**{signal}** recommendation detected.")
+                else:
+                    st.info("No strong Buy or Sell signal.")
+
+                st.markdown("**Trading Strategies:**")
+                for strat in suggest_trading_strategy(signal):
+                    st.write("-", strat)
+
+                # Explain signal/forecast if in conflict
                 trend_numeric = df['Trend'].iloc[-1] if 'Trend' in df.columns else 0
                 explanation = explain_signal_vs_forecast(signal, trend_numeric, forecast)
                 if explanation:
                     st.info(explanation)
 
+                # News Sentiment
                 st.subheader("News Sentiment")
                 news_items = get_news(ticker)
                 if news_items:
@@ -530,53 +340,27 @@ if selected_tab == "Market Information":
                         st.write("-", item)
                 else:
                     st.write("- No news found.")
+
         except Exception as e:
             st.error(f"Error: {e}")
 
 # ========== SUGGESTIONS TAB ==========
 elif selected_tab == "Suggestions":
-    # ... your previously frozen suggestions tab code goes here, unchanged ...
     st.header("💡 AI Suggested Companies to Watch")
-
     ai_suggestions = {
-        "AI": [
-            "NVDA", "SMCI", "AMD", "GOOGL", "MSFT", "PLTR", "META", "TSLA", "BIDU", "ADBE", "CRM", "AI", "SNOW"
-        ],
-        "Semiconductors": [
-            "AVGO", "QCOM", "TXN", "TSM", "ASML", "INTC", "STM", "AMAT", "MRVL", "ON", "MCHP", "NXPI", "ADI", "SWKS"
-        ],
-        "Tech": [
-            "AAPL", "AMZN", "ORCL", "SAP", "IBM", "CSCO", "GOOG", "CRM", "ADBE", "SHOP", "UBER", "SQ", "NOW", "ZM"
-        ],
-        "Defense & Aerospace": [
-            "LMT", "NOC", "RTX", "GD", "PLTR", "BA", "HII", "TXT", "BWXT", "TDG"
-        ],
-        "Nuclear & Clean Energy": [
-            "BWXT", "CCJ", "SMR", "U", "CAMECO", "ICLN", "NEE", "DNN", "XOM", "SHEL"
-        ],
-        "Healthcare": [
-            "JNJ", "PFE", "LLY", "UNH", "CVS", "MRK", "ABT", "MDT", "TMO", "DHR", "BMY", "ZBH", "SNY"
-        ],
-        "Healthcare Tech": [
-            "ISRG", "TDOC", "MDT", "DXCM", "CNC", "HCA", "VEEV", "VRTX", "IDXX", "ALGN"
-        ],
-        "Pharmaceuticals & Biotech": [
-            "PFE", "MRNA", "BNTX", "SNY", "AMGN", "REGN", "GILD", "VRTX", "NVO", "AZN", "BIIB", "RHHBY", "GSK"
-        ],
-        "Clean Energy & Renewables": [
-            "ICLN", "NEE", "ENPH", "SEDG", "PLUG", "FSLR", "BE", "RUN", "TSLA", "BLDP"
-        ],
-        "Cloud/Data/Software": [
-            "MSFT", "GOOGL", "AMZN", "ORCL", "SNOW", "DDOG", "ZS", "MDB", "NET", "PANW", "CRWD", "OKTA"
-        ],
-        "Fintech": [
-            "V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU", "FIS", "FISV"
-        ],
-        "MegaCap & Trending": [
-            "AAPL", "AMZN", "GOOG", "MSFT", "META", "TSLA", "NVDA", "BRK.B", "UNH", "V", "WMT"
-        ]
+        "AI": ["NVDA", "SMCI", "AMD", "GOOGL", "MSFT", "PLTR", "META", "TSLA", "BIDU", "ADBE", "CRM", "AI", "SNOW"],
+        "Semiconductors": ["AVGO", "QCOM", "TXN", "TSM", "ASML", "INTC", "STM", "AMAT", "MRVL", "ON", "MCHP", "NXPI", "ADI", "SWKS"],
+        "Tech": ["AAPL", "AMZN", "ORCL", "SAP", "IBM", "CSCO", "GOOG", "CRM", "ADBE", "SHOP", "UBER", "SQ", "NOW", "ZM"],
+        "Defense & Aerospace": ["LMT", "NOC", "RTX", "GD", "PLTR", "BA", "HII", "TXT", "BWXT", "TDG"],
+        "Nuclear & Clean Energy": ["BWXT", "CCJ", "SMR", "U", "CAMECO", "ICLN", "NEE", "DNN", "XOM", "SHEL"],
+        "Healthcare": ["JNJ", "PFE", "LLY", "UNH", "CVS", "MRK", "ABT", "MDT", "TMO", "DHR", "BMY", "ZBH", "SNY"],
+        "Healthcare Tech": ["ISRG", "TDOC", "MDT", "DXCM", "CNC", "HCA", "VEEV", "VRTX", "IDXX", "ALGN"],
+        "Pharmaceuticals & Biotech": ["PFE", "MRNA", "BNTX", "SNY", "AMGN", "REGN", "GILD", "VRTX", "NVO", "AZN", "BIIB", "RHHBY", "GSK"],
+        "Clean Energy & Renewables": ["ICLN", "NEE", "ENPH", "SEDG", "PLUG", "FSLR", "BE", "RUN", "TSLA", "BLDP"],
+        "Cloud/Data/Software": ["MSFT", "GOOGL", "AMZN", "ORCL", "SNOW", "DDOG", "ZS", "MDB", "NET", "PANW", "CRWD", "OKTA"],
+        "Fintech": ["V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU", "FIS", "FISV"],
+        "MegaCap & Trending": ["AAPL", "AMZN", "GOOG", "MSFT", "META", "TSLA", "NVDA", "BRK.B", "UNH", "V", "WMT"]
     }
-
     sector_keywords_map = {
         "AI": ["artificial", "intelligence", "AI"],
         "Semiconductors": ["semiconductor", "chip", "microchip"],
@@ -591,7 +375,6 @@ elif selected_tab == "Suggestions":
         "Fintech": ["fintech", "finance", "payment", "bank", "digital"],
         "MegaCap & Trending": ["stock market", "biggest companies", "top stocks"]
     }
-
     for sector, tickers in ai_suggestions.items():
         st.subheader(f"🔷 {sector} Sector")
         for ticker in tickers:
@@ -605,7 +388,6 @@ elif selected_tab == "Suggestions":
         sector_news = get_sector_news(kw)
         for headline in sector_news:
             st.write("-", headline)
-
     st.divider()
     st.markdown("### 📰 News")
     all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
