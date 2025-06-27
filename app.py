@@ -70,15 +70,6 @@ def get_news(ticker):
     except:
         return ["No news found."]
 
-def get_fda_approvals():
-    try:
-        rss_url = "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"
-        feed = feedparser.parse(rss_url)
-        return [entry.title for entry in feed.entries[:5]]
-    except:
-        return ["No FDA data available"]
-
-# ---- Sector-wide news scraping ----
 def get_sector_news(sector_keywords):
     try:
         query = "+".join(sector_keywords) + "+sector+news"
@@ -88,6 +79,22 @@ def get_sector_news(sector_keywords):
         return [item.text for item in soup.select('article h3 a')][:5]
     except:
         return ["No sector news found."]
+
+def get_fda_approvals():
+    try:
+        rss_url = "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"
+        feed = feedparser.parse(rss_url)
+        return [entry.title for entry in feed.entries[:5]]
+    except:
+        return ["No FDA data available"]
+
+def get_yahoo_rss_headlines(limit=5):
+    try:
+        rss_url = "https://finance.yahoo.com/rss/topstories"
+        feed = feedparser.parse(rss_url)
+        return [entry.title for entry in feed.entries[:limit]]
+    except:
+        return ["No Yahoo Finance RSS news available."]
 
 def forecast_prices(df, ticker):
     if len(df) < 30:
@@ -308,11 +315,17 @@ elif selected_tab == "Suggestions":
     st.divider()
     st.markdown("### 📰 News")
 
+    # Google News by ticker (as before)
     all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
     for ticker in all_news_sources:
         st.subheader(f"🗞️ {get_company_name(ticker)} ({ticker})")
         for n in get_news(ticker):
             st.write("-", n)
+
+    # Yahoo Finance RSS headlines (NEW)
+    st.subheader("🌐 Yahoo Finance Top Stories")
+    for ynews in get_yahoo_rss_headlines():
+        st.write("-", ynews)
 
     st.subheader("🧪 FDA Drug Approval News")
     for fda in get_fda_approvals():
