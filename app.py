@@ -302,6 +302,31 @@ def _format_profit_margin(val):
     except:
         return "N/A"
 
+def get_financials_timeseries(ticker):
+    try:
+        fin = yf.Ticker(ticker).financials
+        if fin.empty:
+            return None
+        fin = fin.T
+        keys = {
+            'Revenue': ['Total Revenue', 'Revenue'],
+            'Gross Profit': ['Gross Profit'],
+            'Net Income': ['Net Income', 'Net Income Applicable To Common Shares'],
+            'EBITDA': ['EBITDA']
+        }
+        data = {}
+        for k, search_keys in keys.items():
+            for col in search_keys:
+                if col in fin.columns:
+                    data[k] = fin[col]
+                    break
+        df = pd.DataFrame(data)
+        df.index = pd.to_datetime(df.index)
+        df = df.sort_index()
+        return df
+    except:
+        return None
+
 # --- SESSION STATE SETUP ---
 if 'selected_tab' not in st.session_state:
     st.session_state.selected_tab = 0
@@ -349,6 +374,25 @@ if selected_tab == "Market Information":
                         st.write(f"**Profit Margin:** {_format_profit_margin(fundamentals.get('profitMargins'))}")
                 except:
                     pass
+
+                # (New) Financial Performance Chart
+                try:
+                    st.subheader("Financial Performance (Annual)")
+                    fin_df = get_financials_timeseries(ticker)
+                    if fin_df is not None and not fin_df.empty:
+                        col = st.selectbox("Metric", ["All"] + list(fin_df.columns), key="metric_select")
+                        year_range = list(fin_df.index.year)
+                        year_min, year_max = min(year_range), max(year_range)
+                        year_selected = st.slider("Year Range", year_min, year_max, (year_min, year_max), key="year_slider")
+                        filtered = fin_df[(fin_df.index.year >= year_selected[0]) & (fin_df.index.year <= year_selected[1])]
+                        if col == "All":
+                            st.bar_chart(filtered)
+                        else:
+                            st.bar_chart(filtered[[col]])
+                    else:
+                        st.info("No financial data available.")
+                except Exception as e:
+                    st.warning(f"Financial performance chart error: {e}")
 
                 # (2) Earnings/Events
                 try:
