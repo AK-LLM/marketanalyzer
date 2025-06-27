@@ -207,7 +207,6 @@ def get_volatility(df):
 
 def get_signal_history(df):
     try:
-        # Get last 10 buy/sell signals for plotting
         recent = df.tail(100).copy()
         buys = recent[recent['Buy']]
         sells = recent[recent['Sell']]
@@ -216,7 +215,6 @@ def get_signal_history(df):
         return pd.DataFrame(), pd.DataFrame()
 
 def get_peers(ticker):
-    # Simple peer logic: by sector or industry, otherwise use similar large caps
     try:
         info = yf.Ticker(ticker).info
         sector = info.get('sector')
@@ -271,6 +269,39 @@ def get_news_sentiment(ticker):
     except:
         return {}
 
+# -- Formatters for market cap, P/E, and profit margin
+def _format_market_cap(val):
+    try:
+        val = float(val)
+        if val >= 1e12:
+            return f"{val/1e12:.2f}T"
+        elif val >= 1e9:
+            return f"{val/1e9:.2f}B"
+        elif val >= 1e6:
+            return f"{val/1e6:.2f}M"
+        elif val >= 1e3:
+            return f"{val/1e3:.2f}K"
+        else:
+            return str(int(val))
+    except:
+        return "N/A"
+
+def _format_pe(val):
+    try:
+        if val == 'N/A' or val is None:
+            return "N/A"
+        return f"{float(val):.3f}"
+    except:
+        return "N/A"
+
+def _format_profit_margin(val):
+    try:
+        if val == 'N/A' or val is None:
+            return "N/A"
+        return f"{float(val)*100:.2f}%"
+    except:
+        return "N/A"
+
 # --- SESSION STATE SETUP ---
 if 'selected_tab' not in st.session_state:
     st.session_state.selected_tab = 0
@@ -312,10 +343,10 @@ if selected_tab == "Market Information":
                         st.subheader("Company Fundamentals")
                         st.write(f"**Sector:** {fundamentals.get('sector')}")
                         st.write(f"**Industry:** {fundamentals.get('industry')}")
-                        st.write(f"**Market Cap:** {fundamentals.get('marketCap'):,}")
-                        st.write(f"**P/E Ratio:** {fundamentals.get('trailingPE')}")
+                        st.write(f"**Market Cap:** {_format_market_cap(fundamentals.get('marketCap'))}")
+                        st.write(f"**P/E Ratio:** {_format_pe(fundamentals.get('trailingPE'))}")
                         st.write(f"**Dividend Yield:** {fundamentals.get('dividendYield')}")
-                        st.write(f"**Profit Margin:** {fundamentals.get('profitMargins')}")
+                        st.write(f"**Profit Margin:** {_format_profit_margin(fundamentals.get('profitMargins'))}")
                 except:
                     pass
 
