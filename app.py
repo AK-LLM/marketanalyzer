@@ -165,7 +165,6 @@ def explain_signal_vs_forecast(signal, trend, forecast):
         )
     return explanation
 
-# ----- New Feature Functions -----
 def get_fundamentals(ticker):
     try:
         info = yf.Ticker(ticker).info
@@ -269,7 +268,6 @@ def get_news_sentiment(ticker):
     except:
         return {}
 
-# -- Formatters for market cap, P/E, and profit margin
 def _format_market_cap(val):
     try:
         val = float(val)
@@ -299,6 +297,22 @@ def _format_profit_margin(val):
         if val == 'N/A' or val is None:
             return "N/A"
         return f"{float(val)*100:.2f}%"
+    except:
+        return "N/A"
+
+def _format_human_readable(val):
+    try:
+        v = float(val)
+        if abs(v) >= 1e12:
+            return f"${v/1e12:.2f}T"
+        elif abs(v) >= 1e9:
+            return f"${v/1e9:.2f}B"
+        elif abs(v) >= 1e6:
+            return f"${v/1e6:.2f}M"
+        elif abs(v) >= 1e3:
+            return f"${v/1e3:.2f}K"
+        else:
+            return f"${int(v)}"
     except:
         return "N/A"
 
@@ -375,20 +389,36 @@ if selected_tab == "Market Information":
                 except:
                     pass
 
-                # (New) Financial Performance Chart
+                # (NEW) Financial Performance Chart (Lines, Formatted)
                 try:
                     st.subheader("Financial Performance (Annual)")
                     fin_df = get_financials_timeseries(ticker)
                     if fin_df is not None and not fin_df.empty:
-                        col = st.selectbox("Metric", ["All"] + list(fin_df.columns), key="metric_select")
                         year_range = list(fin_df.index.year)
                         year_min, year_max = min(year_range), max(year_range)
-                        year_selected = st.slider("Year Range", year_min, year_max, (year_min, year_max), key="year_slider")
+                        year_selected = st.slider("Year Range", year_min, year_max, (year_min, year_max), key="year_slider2")
                         filtered = fin_df[(fin_df.index.year >= year_selected[0]) & (fin_df.index.year <= year_selected[1])]
-                        if col == "All":
-                            st.bar_chart(filtered)
-                        else:
-                            st.bar_chart(filtered[[col]])
+
+                        fig = go.Figure()
+                        for col in filtered.columns:
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=filtered.index.year,
+                                    y=filtered[col],
+                                    mode='lines+markers',
+                                    name=col,
+                                    text=[_format_human_readable(v) for v in filtered[col]],
+                                    hovertemplate=f"<b>%{{x}}</b><br>{col}: %{{text}}<extra></extra>"
+                                )
+                            )
+                        fig.update_layout(
+                            xaxis_title="Year",
+                            yaxis_title="Value (USD)",
+                            legend_title="Metric",
+                            hovermode="x unified",
+                            template="plotly_white"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("No financial data available.")
                 except Exception as e:
