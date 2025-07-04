@@ -359,4 +359,84 @@ elif selected_tab == "Suggestions":
         "Pharmaceuticals & Biotech": ["PFE", "MRNA", "BNTX", "SNY", "AMGN", "REGN", "GILD", "VRTX", "NVO", "AZN", "BIIB", "RHHBY", "GSK"],
         "Clean Energy & Renewables": ["ICLN", "NEE", "ENPH", "SEDG", "PLUG", "FSLR", "BE", "RUN", "TSLA", "BLDP"],
         "Cloud/Data/Software": ["MSFT", "GOOGL", "AMZN", "ORCL", "SNOW", "DDOG", "ZS", "MDB", "NET", "PANW", "CRWD", "OKTA"],
-        "Fintech": ["V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU
+        "Fintech": ["V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU", "FIS", "FISV"],
+        "MegaCap & Trending": ["AAPL", "AMZN", "GOOG", "MSFT", "META", "TSLA", "NVDA", "BRK.B", "UNH", "V", "WMT"]
+    }
+    sector_keywords_map = {
+        "AI": ["artificial", "intelligence", "AI"],
+        "Semiconductors": ["semiconductor", "chip", "microchip"],
+        "Tech": ["technology", "tech"],
+        "Defense & Aerospace": ["defense", "military", "aerospace"],
+        "Nuclear & Clean Energy": ["nuclear", "uranium", "energy", "clean energy", "renewable"],
+        "Healthcare": ["healthcare", "medical", "health"],
+        "Healthcare Tech": ["healthcare", "technology", "healthtech"],
+        "Pharmaceuticals & Biotech": ["pharma", "pharmaceutical", "biotech", "drug"],
+        "Clean Energy & Renewables": ["clean energy", "renewable", "solar", "wind", "hydrogen"],
+        "Cloud/Data/Software": ["cloud", "software", "data", "SaaS"],
+        "Fintech": ["fintech", "finance", "payment", "bank", "digital"],
+        "MegaCap & Trending": ["stock market", "biggest companies", "top stocks"]
+    }
+    for sector, tickers in ai_suggestions.items():
+        st.subheader(f"🔷 {sector} Sector")
+        for ticker in tickers:
+            name = get_company_name(ticker)
+            st.markdown(f"**{name} ({ticker})**")
+            news_items = get_news(ticker)
+            for n in news_items:
+                st.write("-", n)
+        st.markdown("*Sector-wide breaking/trend news:*")
+        kw = sector_keywords_map.get(sector, [sector])
+        sector_news = get_sector_news(kw)
+        for headline in sector_news:
+            st.write("-", headline)
+    st.divider()
+    st.markdown("### 📰 News")
+    all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
+    for ticker in all_news_sources:
+        st.subheader(f"🗞️ {get_company_name(ticker)} ({ticker})")
+        for n in get_news(ticker):
+            st.write("-", n)
+    st.subheader("🌐 Yahoo Finance Top Stories")
+    for ynews in get_yahoo_rss_headlines():
+        st.write("-", ynews)
+    st.subheader("🧪 FDA Drug Approval News")
+    for fda in get_fda_approvals():
+        st.write("-", fda)
+
+# ========================================================
+# ------- MODULAR TABS: COMMENT/UNCOMMENT AS NEEDED ------
+# ========================================================
+
+elif selected_tab == "Peer Comparison":
+    st.header("Peer Comparison (modular example)")
+    st.info("This is a placeholder for peer/competitor mapping and multi-ticker chart overlays. Add logic as desired.")
+
+elif selected_tab == "Watchlist":
+    st.header("Watchlist (modular example)")
+    st.info("Watchlist logic goes here. Add/remove tickers, persistent storage if desired.")
+
+elif selected_tab == "Financial Health":
+    st.header("Financial Health (modular example)")
+    st.info("Display deep ratios, health metrics, trend charts.")
+
+elif selected_tab == "Options Chain":
+    st.header("Options Chain (modular example)")
+    st.info("Show current options chain (public data), highlight call/put ideas.")
+
+elif selected_tab == "Macro Trends":
+    st.header("Macro Trends (modular example)")
+    st.info("Overlay S&P500, VIX, macro rates, recession signals.")
+
+elif selected_tab == "Portfolio Optimizer":
+    st.header("Portfolio Optimizer (modular example)")
+    st.info("Simple Markowitz optimizer: enter tickers/weights, see risk/return.")
+
+elif selected_tab == "Event Timeline":
+    st.header("Event Timeline (modular example)")
+    st.info("Display price chart with event overlays: earnings, splits, news.")
+
+elif selected_tab == "Experimental":
+    st.header("Experimental/NLP Query (modular example)")
+    st.info("Future space for OpenAI/NLP query or smart chat interface.")
+
+# ----------------------- END OF APP ----------------------
