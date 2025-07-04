@@ -13,7 +13,7 @@ import time
 time.sleep(0.1)
 st.set_page_config(page_title="AI-Powered Market Analyzer", layout="wide")
 
-# ===== Helpers =====
+# ===== Helper Functions =====
 def human_readable(val):
     try:
         val = float(val)
@@ -87,6 +87,9 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs))
     df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['BB_Upper'] = df['Close'].rolling(20).mean() + 2 * df['Close'].rolling(20).std()
+    df['BB_Lower'] = df['Close'].rolling(20).mean() - 2 * df['Close'].rolling(20).std()
+    df['ATR'] = df['High'].combine(df['Low'], max) - df['Low'].combine(df['High'], min)
     df.dropna(inplace=True)
     return df
 
@@ -145,7 +148,6 @@ def forecast_prices(df, ticker):
     prophet_df.columns = ['ds', 'y']
     prophet_df['ds'] = pd.to_datetime(prophet_df['ds'])
     prophet_df['news_sentiment'] = 0
-
     model = Prophet(daily_seasonality=True)
     model.add_regressor('news_sentiment')
     try:
@@ -216,13 +218,16 @@ def get_fundamentals(ticker):
     except:
         return {}
 
-# --- SESSION STATE SETUP ---
+# ---- Session State Setup ----
 if 'selected_tab' not in st.session_state:
     st.session_state.selected_tab = 0
 if 'selected_ticker' not in st.session_state:
     st.session_state.selected_ticker = "AAPL"
 
-tab_names = ["Market Information", "Suggestions"]
+tab_names = [
+    "Market Information", "Suggestions", "Peer Comparison", "Watchlist", 
+    "Financial Health", "Options Chain", "Macro Trends", "Portfolio Optimizer", "Event Timeline", "Experimental"
+]
 selected_tab = st.radio("Navigation", tab_names, index=st.session_state.selected_tab, horizontal=True, key="main_tabs")
 
 # ========== MARKET INFORMATION TAB ==========
@@ -257,9 +262,8 @@ if selected_tab == "Market Information":
                     st.write(f"**P/E Ratio:** {f'{float(fundamentals.get('trailingPE')):.3f}' if fundamentals.get('trailingPE') not in ['N/A', None] else 'N/A'}")
                     st.write(f"**Profit Margin:** {f'{float(fundamentals.get('profitMargins'))*100:.2f}%' if fundamentals.get('profitMargins') not in ['N/A', None] else 'N/A'}")
 
-                # ==== PATCHED SECTION BELOW ====
+                # Financial Performance (Annual)
                 st.subheader("Financial Performance (Annual)")
-
                 fin_df = get_financials_timeseries(ticker)
                 if fin_df is not None and not fin_df.empty:
                     desired_cols = ["Revenue", "Gross Profit", "EBITDA", "Net Income"]
@@ -270,7 +274,6 @@ if selected_tab == "Market Information":
                     min_year, max_year = min(year_range), max(year_range)
                     year_selected = st.slider("Year Range", min_value=min_year, max_value=max_year, value=(min_year, max_year), key="fin_year_slider_patch")
                     plot_df = fin_df.loc[(fin_df.index.year >= year_selected[0]) & (fin_df.index.year <= year_selected[1])]
-
                     fig = go.Figure()
                     metrics = available_cols if metric == "All" else [metric]
                     color_map = {
@@ -299,8 +302,6 @@ if selected_tab == "Market Information":
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("No financial data available.")
-
-                # ==== END PATCH ====
 
                 # 7-Day Price Forecast (Line)
                 st.subheader("7-Day Price Forecast")
@@ -358,46 +359,4 @@ elif selected_tab == "Suggestions":
         "Pharmaceuticals & Biotech": ["PFE", "MRNA", "BNTX", "SNY", "AMGN", "REGN", "GILD", "VRTX", "NVO", "AZN", "BIIB", "RHHBY", "GSK"],
         "Clean Energy & Renewables": ["ICLN", "NEE", "ENPH", "SEDG", "PLUG", "FSLR", "BE", "RUN", "TSLA", "BLDP"],
         "Cloud/Data/Software": ["MSFT", "GOOGL", "AMZN", "ORCL", "SNOW", "DDOG", "ZS", "MDB", "NET", "PANW", "CRWD", "OKTA"],
-        "Fintech": ["V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU", "FIS", "FISV"],
-        "MegaCap & Trending": ["AAPL", "AMZN", "GOOG", "MSFT", "META", "TSLA", "NVDA", "BRK.B", "UNH", "V", "WMT"]
-    }
-    sector_keywords_map = {
-        "AI": ["artificial", "intelligence", "AI"],
-        "Semiconductors": ["semiconductor", "chip", "microchip"],
-        "Tech": ["technology", "tech"],
-        "Defense & Aerospace": ["defense", "military", "aerospace"],
-        "Nuclear & Clean Energy": ["nuclear", "uranium", "energy", "clean energy", "renewable"],
-        "Healthcare": ["healthcare", "medical", "health"],
-        "Healthcare Tech": ["healthcare", "technology", "healthtech"],
-        "Pharmaceuticals & Biotech": ["pharma", "pharmaceutical", "biotech", "drug"],
-        "Clean Energy & Renewables": ["clean energy", "renewable", "solar", "wind", "hydrogen"],
-        "Cloud/Data/Software": ["cloud", "software", "data", "SaaS"],
-        "Fintech": ["fintech", "finance", "payment", "bank", "digital"],
-        "MegaCap & Trending": ["stock market", "biggest companies", "top stocks"]
-    }
-    for sector, tickers in ai_suggestions.items():
-        st.subheader(f"🔷 {sector} Sector")
-        for ticker in tickers:
-            name = get_company_name(ticker)
-            st.markdown(f"**{name} ({ticker})**")
-            news_items = get_news(ticker)
-            for n in news_items:
-                st.write("-", n)
-        st.markdown("*Sector-wide breaking/trend news:*")
-        kw = sector_keywords_map.get(sector, [sector])
-        sector_news = get_sector_news(kw)
-        for headline in sector_news:
-            st.write("-", headline)
-    st.divider()
-    st.markdown("### 📰 News")
-    all_news_sources = list({ticker for sector_list in ai_suggestions.values() for ticker in sector_list})
-    for ticker in all_news_sources:
-        st.subheader(f"🗞️ {get_company_name(ticker)} ({ticker})")
-        for n in get_news(ticker):
-            st.write("-", n)
-    st.subheader("🌐 Yahoo Finance Top Stories")
-    for ynews in get_yahoo_rss_headlines():
-        st.write("-", ynews)
-    st.subheader("🧪 FDA Drug Approval News")
-    for fda in get_fda_approvals():
-        st.write("-", fda)
+        "Fintech": ["V", "MA", "PYPL", "SQ", "AXP", "COIN", "SOFI", "INTU
