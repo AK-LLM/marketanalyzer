@@ -1,11 +1,24 @@
-# AI-Powered Market Analyzer
+# AI-Powered Market Analyzer Terminal
+
+A Streamlit app for global stocks, ETFs, crypto, forex, and sector monitoring with real-time news and financial analytics.
 
 ## Features
-- **Market Information Tab**: Analyze any global ticker (stocks, ETFs, crypto, FOREX, commodities). See company name, current price, signal (Buy/Hold/Sell), trend, 7-day forecast, financials (Revenue, Gross Profit, EBITDA, Net Income), strategy suggestions, and latest news.
-- **Suggestions Tab**: AI-curated companies to watch in sectors like AI, Tech, Defense, Nuclear, Healthcare, Pharma, and more. Scrapes and displays latest sector and ticker news, Yahoo Finance top stories, and FDA approvals.
-- **Extensible**: Modular code ready for enhancements like multi-ticker compare, peer comparison, watchlists, macro overlays, options chain, portfolio optimizer, and more.
+- Ticker & company name smart search for all tabs
+- Technical analysis, AI-powered signals, and 7-day forecasting
+- Aggregated breaking news from 10+ sources (Google, Yahoo, Reuters, MarketWatch, CNBC, FDA, etc.)
+- Peer comparison, watchlist, financial health, options analytics, macro indicators, and news explorer
+- Canadian, US, and global market coverage
 
-## Getting Started
-1. Install Python 3.9 or newer.
-2. Clone or copy all files (`app.py`, `requirements.txt`, `README.md`).
-3. Install requirements:
+## Setup
+1. Clone this repo or copy `app.py`, `requirements.txt`, and `README.md` into your project
+2. `pip install -r requirements.txt`
+3. `streamlit run app.py`
+4. Deploy to Streamlit Cloud, HuggingFace, or your own infra
+
+**No paid APIs required.**
+
+---
+
+## Change Log
+
+- [2025-06-27] Initial release (full feature set)
