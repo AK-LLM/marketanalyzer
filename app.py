@@ -1,294 +1,222 @@
 import streamlit as st
-import requests
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import numpy as np
 import plotly.graph_objects as go
 from prophet import Prophet
-import feedparser
+import requests
+from bs4 import BeautifulSoup
+import os
 
 st.set_page_config(page_title="Market Terminal", layout="wide")
-st.title("Market Terminal")
 
-TABS = [
-    "Market Information", "Suggestions", "Peer Comparison", "Watchlist", "Financial Health",
-    "Options Analytics", "Macro Insights", "News Explorer"
-]
-tab_idx = st.session_state.get("tab_idx", 0)
-tab_names = st.columns(len(TABS))
-for i, tab in enumerate(TABS):
-    if tab_names[i].button(tab, key=f"nav_{tab}", use_container_width=True):
-        st.session_state["tab_idx"] = i
-        tab_idx = i
+# Load the tickers CSV
+@st.cache_data(show_spinner=True)
+def load_ticker_db():
+    # This expects a file called global_tickers.csv in the app directory
+    if not os.path.exists("global_tickers.csv"):
+        st.warning("global_tickers.csv file not found. Please download a world company/ticker database and place it in the app directory.")
+        return pd.DataFrame(columns=['symbol', 'name', 'exchange'])
+    df = pd.read_csv("global_tickers.csv", dtype=str)
+    df = df.dropna(subset=['symbol', 'name'])
+    df['symbol'] = df['symbol'].str.upper()
+    df['name'] = df['name'].str.title()
+    return df
 
-def yahoo_autocomplete(query, count=8):
-    """Return list of dicts: [{'symbol':..., 'name':..., 'exchDisp':...}, ...]"""
-    if not query:
+tickers_db = load_ticker_db()
+
+def search_tickers_db(q):
+    q = q.strip().upper()
+    if not q:
         return []
-    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US"
+    # Match on symbol or name (case insensitive)
+    results = tickers_db[tickers_db.apply(lambda row: q in row['symbol'] or q in row['name'].upper(), axis=1)]
+    # Show up to 20 matches
+    return results[['symbol', 'name', 'exchange']].head(20).to_dict("records")
+
+def resolve_symbol(q):
+    # Try exact symbol first
+    df = tickers_db[tickers_db['symbol'] == q.upper()]
+    if not df.empty:
+        return df.iloc[0]['symbol'], df.iloc[0]['name'], df.iloc[0]['exchange']
+    # Try fuzzy search
+    results = search_tickers_db(q)
+    if results:
+        return results[0]['symbol'], results[0]['name'], results[0]['exchange']
+    return q.upper(), q.title(), ""
+
+def get_company_name(symbol):
+    df = tickers_db[tickers_db['symbol'] == symbol.upper()]
+    if not df.empty:
+        return df.iloc[0]['name']
     try:
-        data = requests.get(url, timeout=8).json()
-        return [
-            {
-                "symbol": r.get("symbol", ""),
-                "name": r.get("shortname", "") or r.get("longname", "") or "",
-                "exchange": r.get("exchDisp", ""),
-                "type": r.get("typeDisp", "")
-            }
-            for r in data.get("quotes", [])
-            if r.get("symbol")
-        ][:count]
-    except Exception:
-        return []
+        info = yf.Ticker(symbol).info
+        return info.get('longName') or info.get('shortName') or symbol
+    except:
+        return symbol
 
-def resolve_symbol(query):
-    # Try exact symbol, else autocomplete
-    query = query.strip().upper()
-    if query:
-        ac = yahoo_autocomplete(query)
-        for c in ac:
-            if c["symbol"].upper() == query:
-                return c["symbol"], c["name"], c["exchange"]
-        if ac:
-            return ac[0]["symbol"], ac[0]["name"], ac[0]["exchange"]
-    return "", "", ""
-
-def get_yf_data(ticker, period="1y"):
+@st.cache_data(show_spinner=True)
+def get_data(symbol, period='1y'):
     try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-        if df.empty:
-            return None
-        return df
-    except Exception:
-        return None
+        data = yf.download(symbol, period=period, auto_adjust=True, progress=False)
+        if data.empty or 'Close' not in data.columns:
+            raise ValueError("No price data available for this ticker.")
+        return data
+    except Exception as e:
+        return pd.DataFrame()
 
-def google_news(ticker_or_name, count=7):
-    q = ticker_or_name.replace("&", " ")
-    url = f"https://news.google.com/rss/search?q={q}+stock"
-    try:
-        feed = feedparser.parse(url)
-        return list({entry.link: entry.title for entry in feed.entries[:count]}.items())
-    except Exception:
-        return []
+def calculate_indicators(df):
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+    df['Signal_Line'] = df['MACD'].ewm(span=9).mean()
+    df = df.dropna()
+    return df
 
-def yahoo_news(ticker, count=7):
-    url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
-    try:
-        feed = feedparser.parse(url)
-        return list({entry.link: entry.title for entry in feed.entries[:count]}.items())
-    except Exception:
-        return []
+def generate_signals(df):
+    df['Trend'] = np.where(df['SMA_50'] > df['SMA_200'], 1, -1)
+    df['Buy'] = (df['RSI'] < 30) & (df['MACD'] > df['Signal_Line']) & (df['Trend'] == 1)
+    df['Sell'] = (df['RSI'] > 70) & (df['MACD'] < df['Signal_Line']) & (df['Trend'] == -1)
+    df['Signal'] = np.where(df['Buy'], 'Buy', np.where(df['Sell'], 'Sell', 'Hold'))
+    return df
 
-def get_company_info(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        return info
-    except Exception:
-        return {}
-
-def plot_forecast(df, periods=7):
-    if len(df) < 40:
-        return None
-    hist = df[["Close"]].reset_index().rename(columns={"Date":"ds", "Close":"y"})
-    hist["ds"] = pd.to_datetime(hist["ds"])
+def forecast_prices(df, days=7):
+    df_prophet = df[['Close']].reset_index()
+    df_prophet.columns = ['ds', 'y']
     model = Prophet(daily_seasonality=True)
-    model.fit(hist)
-    fut = model.make_future_dataframe(periods=periods)
-    forecast = model.predict(fut)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hist['ds'], y=hist['y'], name='History'))
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name=f"{periods}-Day Forecast"))
-    return fig
+    model.fit(df_prophet)
+    future = model.make_future_dataframe(periods=days)
+    forecast = model.predict(future)
+    return forecast[['ds', 'yhat']].tail(days)
 
-def news_section(symbol, name):
-    news_items = []
-    for news_feed in [google_news, yahoo_news]:
-        news_items += news_feed(symbol) + news_feed(name)
-    seen = set()
-    deduped = []
-    for url, title in news_items:
-        if url not in seen:
-            seen.add(url)
-            deduped.append((url, title))
-    return deduped[:8]
+def get_news(symbol, n=5):
+    # Google Finance News
+    url = f"https://news.google.com/search?q={symbol}+stock"
+    try:
+        html = requests.get(url, timeout=5).text
+        soup = BeautifulSoup(html, 'html.parser')
+        headlines = []
+        for h in soup.select('article h3 a')[:n]:
+            href = h['href']
+            if href.startswith('.'):
+                href = "https://news.google.com" + href[1:]
+            headlines.append((h.text, href))
+        return headlines if headlines else [("No news found.", "")]
+    except:
+        return [("No news found.", "")]
 
-# --- TABS LOGIC ---
-if tab_idx == 0: # Market Information
+def show_market_info():
     st.header("Market Information")
-    st.caption("Type company name or ticker (Name or Ticker):")
-    query = st.text_input("", key="market_query")
-    choices = yahoo_autocomplete(query)
-    symbol = ""
-    if choices:
-        labels = [f"{c['name']} ({c['symbol']}, {c['exchange']})" for c in choices]
-        choice = st.selectbox("Select:", labels, key="market_symbol_select")
-        i = labels.index(choice)
-        symbol = choices[i]["symbol"]
-        name = choices[i]["name"]
-    else:
-        symbol = query.strip().upper()
-        name = ""
-    if symbol:
-        name = name or symbol
-        st.subheader(f"{name} ({symbol})")
-        df = get_yf_data(symbol)
-        if df is not None:
-            st.metric("Current Price", f"${df['Close'].iloc[-1]:,.2f}")
-            # Simple strategy suggestion
-            change = df['Close'][-1] - df['Close'][-2] if len(df) > 1 else 0
-            if change > 0:
-                sig = "Buy"
-                msg = "Momentum is positive"
-            elif change < 0:
-                sig = "Sell"
-                msg = "Momentum is negative"
-            else:
-                sig = "Hold"
-                msg = "No clear direction"
-            st.metric("Signal", sig)
-            st.caption(f"Rationale: {msg}")
-            # 7-day forecast
-            fc_fig = plot_forecast(df, periods=7)
-            if fc_fig:
-                st.plotly_chart(fc_fig, use_container_width=True)
-            else:
-                st.info("Not enough data for forecast.")
-            # News
-            st.subheader("News")
-            for url, title in news_section(symbol, name):
-                st.markdown(f"- [{title}]({url})")
+    query = st.text_input("Type company name or ticker (Name or Ticker):", "")
+    options = []
+    selected = ""
+    if query:
+        options = search_tickers_db(query)
+        if options:
+            selected = st.selectbox("Select:", [f"{x['name']} ({x['symbol']}) [{x['exchange']}]" for x in options])
         else:
+            selected = ""
+    symbol = ""
+    name = ""
+    exchange = ""
+    if selected:
+        idx = [i for i, x in enumerate(options) if f"{x['name']} ({x['symbol']}) [{x['exchange']}]" == selected]
+        if idx:
+            symbol, name, exchange = options[idx[0]]['symbol'], options[idx[0]]['name'], options[idx[0]]['exchange']
+    elif query:
+        symbol, name, exchange = resolve_symbol(query)
+    if symbol:
+        st.subheader(f"{name.upper()} ({symbol.upper()})")
+        data = get_data(symbol)
+        if data.empty:
             st.warning("No price data available for this ticker. Please check the ticker symbol or try another.")
+            return
+        data = calculate_indicators(data)
+        data = generate_signals(data)
+        # Signal and Trend
+        signal = str(data['Signal'].iloc[-1]) if not data.empty else "N/A"
+        trend = "📈 Bullish" if data['Trend'].iloc[-1] == 1 else "📉 Bearish"
+        st.metric("Signal", signal)
+        st.metric("Trend", trend)
+        # Forecast
+        st.subheader("7-Day Price Forecast")
+        forecast = forecast_prices(data)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name='Forecast', line=dict(shape='linear')))
+        st.plotly_chart(fig, use_container_width=True)
+        # News
+        st.subheader("Latest News")
+        for title, url in get_news(symbol):
+            st.write(f"- [{title}]({url})")
     else:
         st.info("Type a company name and select a valid ticker from the dropdown.")
 
-elif tab_idx == 1: # Suggestions
+def show_suggestions():
     st.header("AI Suggestions & News")
-    # Example sectors and companies (expand as needed)
-    sectors = {
-        "AI": ["NVDA", "AMD", "SMCI", "GOOGL", "BIDU", "TSM"],
-        "Nuclear": ["BWXT", "SMR", "CAMEF", "U", "PDN.TO", "CCJ"],
-        "Tech": ["AAPL", "MSFT", "AVGO", "AMZN", "TSLA", "SHOP.TO", "SAP.DE", "SONY"],
-        "Healthcare": ["JNJ", "PFE", "MRK", "RHHBY", "UNH", "BNTX", "XBI"],
-        "Defense": ["LMT", "NOC", "RTX", "BA", "TDG", "BBD-B.TO"],
-        "Pharma": ["MRNA", "AZN", "NVS", "GILD", "SNY"],
-        "Canada": ["TD.TO", "BNS.TO", "ENB.TO", "SHOP.TO", "BCE.TO"]
+    # Example: sector-sorted, you can expand this as needed
+    ai_sectors = {
+        "AI": ["NVDA", "MSFT", "GOOGL", "AMD", "TSLA", "AVGO", "SMCI"],
+        "Healthcare": ["JNJ", "PFE", "MRK", "UNH", "RHHBY"],
+        "Pharma": ["PFE", "MRNA", "BNTX", "GILD"],
+        "Defense": ["LMT", "NOC", "RTX", "BA", "GD"],
+        "Nuclear": ["BWXT", "SMR"],
+        "Tech": ["AAPL", "AMZN", "META", "SAP", "SHOP"],
+        "Commodities": ["GLD", "SLV", "BHP", "RIO", "VALE"]
     }
-    for sec, tickers in sectors.items():
-        st.subheader(f"{sec} Sector")
+    for sector, tickers in ai_sectors.items():
+        st.subheader(f"{sector} Sector")
         for t in tickers:
-            info = get_company_info(t)
-            n = info.get("shortName") or info.get("longName") or t
-            st.markdown(f"**{n} ({t})**")
-            news = news_section(t, n)
-            for url, title in news:
-                st.write("-", f"[{title}]({url})")
-        st.markdown("---")
-    st.subheader("Market-Wide News")
-    for url, title in google_news("stock market") + yahoo_news("stock market"):
-        st.write("-", f"[{title}]({url})")
+            st.markdown(f"**{get_company_name(t)} ({t})**")
+            for title, url in get_news(t):
+                st.write(f"- [{title}]({url})")
+    st.divider()
+    st.subheader("Sector/Global News")
+    for t in ["^GSPC", "^IXIC", "^N225", "^FTSE", "BTC-USD"]:
+        st.write(f"**News for {t}**")
+        for title, url in get_news(t):
+            st.write(f"- [{title}]({url})")
 
-elif tab_idx == 2: # Peer Comparison
+def peer_comparison_tab():
     st.header("Peer Comparison")
-    st.caption("Type company name or ticker (Name or Ticker):")
-    query = st.text_input("", key="peer_query")
-    choices = yahoo_autocomplete(query)
-    symbol = ""
-    if choices:
-        labels = [f"{c['name']} ({c['symbol']}, {c['exchange']})" for c in choices]
-        choice = st.selectbox("Select:", labels, key="peer_symbol_select")
-        i = labels.index(choice)
-        symbol = choices[i]["symbol"]
-        name = choices[i]["name"]
-    else:
-        symbol = query.strip().upper()
-        name = ""
-    if symbol:
-        info = get_company_info(symbol)
-        peers = info.get("sector") or ""
-        # Simple example, real implementation may require better peer lookup
-        st.write(f"Peers for {symbol} in {peers or 'N/A'} sector: (coming soon)")
+    st.write("Peer company analysis coming soon.")
 
-elif tab_idx == 3: # Watchlist
+def watchlist_tab():
     st.header("Watchlist")
-    watchlist = st.session_state.get("watchlist", [])
-    addq = st.text_input("Add company (Name or Ticker):", key="add_watch")
-    if st.button("Add to Watchlist") and addq:
-        s, n, _ = resolve_symbol(addq)
-        if s and s not in watchlist:
-            watchlist.append(s)
-            st.session_state["watchlist"] = watchlist
-    if watchlist:
-        for w in watchlist:
-            info = get_company_info(w)
-            n = info.get("shortName") or info.get("longName") or w
-            col1, col2 = st.columns([4,1])
-            with col1:
-                st.markdown(f"**{n} ({w})**")
-            with col2:
-                if st.button("Remove", key=f"rm_{w}"):
-                    watchlist.remove(w)
-                    st.session_state["watchlist"] = watchlist
-        st.session_state["watchlist"] = watchlist
-    else:
-        st.info("No companies in your watchlist.")
+    st.info("Watchlist functionality coming soon. (Will support add/remove for selected tickers.)")
 
-elif tab_idx == 4: # Financial Health
+def financial_health_tab():
     st.header("Financial Health")
-    st.caption("Select company (Name or Ticker):")
-    query = st.text_input("", key="fh_query")
-    choices = yahoo_autocomplete(query)
-    symbol = ""
-    if choices:
-        labels = [f"{c['name']} ({c['symbol']}, {c['exchange']})" for c in choices]
-        choice = st.selectbox("Select:", labels, key="fh_symbol_select")
-        i = labels.index(choice)
-        symbol = choices[i]["symbol"]
-        name = choices[i]["name"]
-    else:
-        symbol = query.strip().upper()
-        name = ""
-    if symbol:
-        info = get_company_info(symbol)
-        ratios = {
-            "Market Cap": info.get("marketCap"),
-            "PE Ratio": info.get("trailingPE"),
-            "EPS": info.get("trailingEps"),
-            "ROE": info.get("returnOnEquity"),
-            "Debt/Equity": info.get("debtToEquity"),
-            "Dividend Yield": info.get("dividendYield")
-        }
-        st.write({k: v for k, v in ratios.items() if v is not None})
-    else:
-        st.info("Select a company.")
+    st.info("Balance sheet, PnL, ratios, and analytics coming soon.")
 
-elif tab_idx == 5: # Options Analytics
+def options_analytics_tab():
     st.header("Options Analytics")
-    st.write("Type ticker (US stocks only):")
-    query = st.text_input("", key="opt_query")
-    symbol, name, _ = resolve_symbol(query)
-    if symbol:
-        try:
-            ticker = yf.Ticker(symbol)
-            opts = ticker.options
-            st.write(f"Options available: {opts}")
-        except Exception:
-            st.warning("Options data only for major US stocks.")
+    st.info("Global options analytics coming soon (US only for now, global support if free data available).")
 
-elif tab_idx == 6: # Macro Insights
+def macro_insights_tab():
     st.header("Macro Insights")
-    st.write("Global macro indicators coming soon.")
+    st.info("Global macro indicators coming soon.")
 
-elif tab_idx == 7: # News Explorer
+def news_explorer_tab():
     st.header("News Explorer")
-    q = st.text_input("Search news for:", key="newsq")
-    if q:
-        st.subheader("Google News")
-        for url, title in google_news(q, count=10):
-            st.write("-", f"[{title}]({url})")
-        st.subheader("Yahoo Finance News")
-        for url, title in yahoo_news(q, count=10):
-            st.write("-", f"[{title}]({url})")
+    st.info("Search and browse sector and market news.")
 
-# ------ The rest of the tabs ("Peer Comparison", "Watchlist", "Financial Health", etc.) are implemented as modular enhancements ------
-# ------ You can add, comment out, or move them based on your needs. ------
+# -----------------
+# Main navigation
+tabs = {
+    "Market Information": show_market_info,
+    "Suggestions": show_suggestions,
+    "Peer Comparison": peer_comparison_tab,
+    "Watchlist": watchlist_tab,
+    "Financial Health": financial_health_tab,
+    "Options Analytics": options_analytics_tab,
+    "Macro Insights": macro_insights_tab,
+    "News Explorer": news_explorer_tab,
+}
+selection = st.sidebar.radio("Navigation", list(tabs.keys()), index=0)
+tabs[selection]()
+
