@@ -1,72 +1,238 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 import requests
+import json
+import datetime
+from prophet import Prophet
 import feedparser
-import plotly.graph_objs as go
-import os
+from bs4 import BeautifulSoup
+import time
 
-# ============ GLOBAL VARS ============= #
-st.set_page_config(page_title="Market Terminal", layout="wide")
-TICKER_FILE = "global_tickers.csv"
-if os.path.exists(TICKER_FILE):
-    tickers_df = pd.read_csv(TICKER_FILE)
-    tickers_df = tickers_df.dropna(subset=["Symbol", "Name"])
-    tickers_df["Symbol"] = tickers_df["Symbol"].astype(str)
-    tickers_df["Name"] = tickers_df["Name"].astype(str)
-else:
-    tickers_df = pd.DataFrame(columns=["Symbol", "Name", "Exchange"])
+# ------------- WIDEST POSSIBLE GLOBAL TICKER + NAME RESOLUTION -------------
+@st.cache_data(show_spinner=False)
+def get_ticker_list():
+    url = "https://raw.githubusercontent.com/ranaroussi/yfinance-extra/master/data/all_tickers.json"
+    try:
+        tickers_df = pd.read_json(url)
+        tickers_df = tickers_df.dropna(subset=['symbol', 'name'])
+        tickers_df.columns = [c.capitalize() for c in tickers_df.columns]
+        return tickers_df
+    except Exception:
+        # Fallback to most common
+        symbols = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA", "AMZN", "META", "BABA", "BRK-A", "V", "JPM"]
+        names = ["Apple", "Microsoft", "Alphabet", "Tesla", "NVIDIA", "Amazon", "Meta Platforms", "Alibaba", "Berkshire Hathaway", "Visa", "JP Morgan Chase"]
+        return pd.DataFrame({"Symbol": symbols, "Name": names})
 
-def resolve_ticker(query):
-    if not isinstance(query, str) or not query:
+# ------------- TICKER RESOLVE FUNCTION -------------
+def search_tickers(name_or_ticker, tickers_df):
+    name_or_ticker = name_or_ticker.strip().lower()
+    mask = (tickers_df["Name"].str.lower().str.contains(name_or_ticker)) | (tickers_df["Symbol"].str.lower() == name_or_ticker)
+    results = tickers_df[mask].reset_index(drop=True)
+    return results
+
+def get_company_name(symbol, tickers_df):
+    try:
+        return tickers_df[tickers_df["Symbol"].str.upper() == symbol.upper()]["Name"].values[0]
+    except:
+        try:
+            return yf.Ticker(symbol).info.get('longName') or yf.Ticker(symbol).info.get('shortName') or symbol
+        except:
+            return symbol
+
+# ------------- YFINANCE DATA FETCHING -------------
+def get_data(ticker, period='1y'):
+    try:
+        data = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        if data.empty or 'Close' not in data.columns:
+            raise ValueError("No valid data found for ticker.")
+        return data
+    except Exception as e:
+        raise ValueError(f"Failed to fetch data for ticker: {str(e)}")
+
+# ------------- SIGNALS + INDICATORS -------------
+def calculate_indicators(df):
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    df['MACD'] = df['Close'].ewm(span=12, adjust=False).mean() - df['Close'].ewm(span=26, adjust=False).mean()
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df.dropna(inplace=True)
+    return df
+
+def generate_signals(df):
+    df['Trend'] = np.where(df['SMA_50'] > df['SMA_200'], 1, -1)
+    df['Buy'] = (df['RSI'] < 30) & (df['MACD'] > df['Signal_Line']) & (df['Trend'] == 1)
+    df['Sell'] = (df['RSI'] > 70) & (df['MACD'] < df['Signal_Line']) & (df['Trend'] == -1)
+    df['Signal'] = np.where(df['Buy'], 'Buy', np.where(df['Sell'], 'Sell', 'Hold'))
+    return df
+
+def get_signal_explanation(df):
+    if df.empty:
+        return "No sufficient data for signals."
+    reasons = []
+    if df['Buy'].iloc[-1]:
+        reasons.append("Oversold (RSI < 30), bullish crossover (MACD > Signal), and positive trend (SMA50 > SMA200).")
+    elif df['Sell'].iloc[-1]:
+        reasons.append("Overbought (RSI > 70), bearish crossover (MACD < Signal), and negative trend (SMA50 < SMA200).")
+    else:
+        reasons.append("Neutral: No strong buy/sell indicators. Market may be consolidating.")
+    return " ".join(reasons)
+
+# ------------- 7 DAY FORECASTING -------------
+def forecast_prices(df, ticker):
+    df = df[['Close']].copy().reset_index()
+    df.columns = ['ds', 'y']
+    df['ds'] = pd.to_datetime(df['ds'])
+    model = Prophet(daily_seasonality=True)
+    try:
+        model.fit(df)
+        future = model.make_future_dataframe(periods=7)
+        forecast = model.predict(future)
+        return forecast[['ds', 'yhat']].tail(7)
+    except Exception:
+        # fallback
+        return pd.DataFrame({'ds': pd.date_range(df['ds'].max(), periods=7, freq="D"), 'yhat': np.nan})
+
+# ------------- FINANCIALS -------------
+def get_financials(ticker):
+    try:
+        yf_ticker = yf.Ticker(ticker)
+        fin = yf_ticker.financials
+        bal = yf_ticker.balance_sheet
+        cash = yf_ticker.cashflow
+        return fin, bal, cash
+    except Exception:
+        return None, None, None
+
+# ------------- PEERS (BEST EFFORT: INDUSTRY) -------------
+def get_peers(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        sector = info.get('sector', '')
+        industry = info.get('industry', '')
+        tickers_df = get_ticker_list()
+        # Try to match companies with same sector or industry
+        mask = (tickers_df['Name'].str.lower().str.contains(industry.lower())) | \
+               (tickers_df['Name'].str.lower().str.contains(sector.lower()))
+        peers = tickers_df[mask]
+        return peers.head(10)
+    except Exception:
+        return pd.DataFrame()
+
+# ------------- OPTIONS ANALYTICS (BASIC CHAIN) -------------
+def get_options_chain(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        dates = t.options
+        if not dates:
+            return None
+        opt = t.option_chain(dates[0])
+        return opt.calls, opt.puts
+    except Exception:
         return None, None
-    query = query.strip().upper()
-    # Try symbol first
-    matches = tickers_df[tickers_df["Symbol"].str.upper() == query]
-    if not matches.empty:
-        return matches.iloc[0]["Symbol"], matches.iloc[0]["Name"]
-    # Try name search
-    name_matches = tickers_df[tickers_df["Name"].str.upper().str.contains(query)]
-    if not name_matches.empty:
-        # If multiple, return the first and let user know to be more specific
-        return name_matches.iloc[0]["Symbol"], name_matches.iloc[0]["Name"]
-    return None, None
 
-def get_news(company_or_ticker):
-    # Yahoo RSS
-    yahoo_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={company_or_ticker}&region=US&lang=en-US"
+def suggest_trading_strategy(df):
+    if df.empty:
+        return "No data for strategy suggestion."
+    signal = df['Signal'].iloc[-1]
+    if signal == "Buy":
+        return "Consider: Buy stock, Bull Call Spread, or Long Call Option (if available)."
+    elif signal == "Sell":
+        return "Consider: Sell/Short, Bear Put Spread, or Long Put Option."
+    else:
+        return "Hold: No strong strategy, consider protective stop-loss orders."
+
+# ------------- MACRO INSIGHTS (BASIC LIVE INDICES) -------------
+def get_macro_indices():
+    indices = {"S&P 500": "^GSPC", "NASDAQ": "^IXIC", "DAX": "^GDAXI", "Nikkei": "^N225", "FTSE": "^FTSE", "Hang Seng": "^HSI"}
+    out = []
+    for name, symbol in indices.items():
+        try:
+            price = yf.Ticker(symbol).history(period="1d")["Close"].iloc[-1]
+        except Exception:
+            price = np.nan
+        out.append((name, symbol, price))
+    return out
+
+# ------------- NEWS SOURCING (MULTI-FEED) -------------
+def get_news(ticker, company_name=None):
+    news_items = []
     try:
-        d = feedparser.parse(yahoo_url)
-        news_list = []
-        for entry in d.entries[:8]:
-            news_list.append({"title": entry.title, "link": entry.link})
-        if news_list:
-            return news_list
+        # Google News
+        url = f"https://news.google.com/rss/search?q={ticker}+stock"
+        feed = feedparser.parse(url)
+        news_items += [(entry.title, entry.link) for entry in feed.entries[:5]]
     except:
         pass
-    # Google News RSS as fallback
-    google_url = f"https://news.google.com/rss/search?q={company_or_ticker}"
     try:
-        d = feedparser.parse(google_url)
-        news_list = []
-        for entry in d.entries[:8]:
-            news_list.append({"title": entry.title, "link": entry.link})
-        return news_list
+        # Yahoo Finance
+        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+        feed = feedparser.parse(url)
+        news_items += [(entry.title, entry.link) for entry in feed.entries[:5]]
     except:
         pass
-    return []
+    # Try company name search
+    if company_name:
+        try:
+            url = f"https://news.google.com/rss/search?q={company_name}"
+            feed = feedparser.parse(url)
+            news_items += [(entry.title, entry.link) for entry in feed.entries[:3]]
+        except:
+            pass
+    # Deduplicate
+    seen = set()
+    filtered = []
+    for t, l in news_items:
+        if l not in seen:
+            filtered.append((t, l))
+            seen.add(l)
+    return filtered
 
-def get_macro_news():
-    # Macro news: general economics/central banks/FX, best-effort
-    macro_url = "https://news.google.com/rss/search?q=economy+OR+central+bank+OR+inflation+OR+macro"
-    d = feedparser.parse(macro_url)
-    news_list = []
-    for entry in d.entries[:8]:
-        news_list.append({"title": entry.title, "link": entry.link})
-    return news_list
+def get_sector_news(sector_keywords):
+    # Scrapes Google News and Yahoo Finance RSS for sector-wide news
+    sector_news = []
+    for kw in sector_keywords:
+        try:
+            url = f"https://news.google.com/rss/search?q={kw}"
+            feed = feedparser.parse(url)
+            sector_news += [(entry.title, entry.link) for entry in feed.entries[:3]]
+        except:
+            pass
+        try:
+            url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={kw}&region=US&lang=en-US"
+            feed = feedparser.parse(url)
+            sector_news += [(entry.title, entry.link) for entry in feed.entries[:2]]
+        except:
+            pass
+    # Deduplicate
+    seen = set()
+    filtered = []
+    for t, l in sector_news:
+        if l not in seen:
+            filtered.append((t, l))
+            seen.add(l)
+    return filtered[:12]
 
-# ========== SIDEBAR NAVIGATION ========== #
-tabs = [
+def get_fda_approvals():
+    try:
+        rss_url = "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"
+        feed = feedparser.parse(rss_url)
+        return [(entry.title, entry.link) for entry in feed.entries[:5]]
+    except:
+        return []
+
+# ----------------------------- STREAMLIT UI START --------------------------
+st.set_page_config(page_title="Global Market Analyzer", layout="wide")
+st.markdown("<style>footer {visibility: hidden;} .reportview-container .main .block-container{padding-top:2rem;}</style>", unsafe_allow_html=True)
+
+TABS = [
     "Market Information",
     "Suggestions",
     "Peer Comparison",
@@ -76,242 +242,228 @@ tabs = [
     "Macro Insights",
     "News Explorer"
 ]
-st.markdown("<h1 style='font-size:2.8rem;'>Market Terminal</h1>", unsafe_allow_html=True)
-selected_tab = st.selectbox(
-    "Navigation", tabs, key="nav", label_visibility="collapsed", index=0,
-    options=tabs, format_func=lambda x: x
-)
 
-# ========== TABS IMPLEMENTATION ========== #
+tab_idx = st.sidebar.radio("Navigation", TABS, horizontal=True)
+tickers_df = get_ticker_list()
 
-if selected_tab == "Market Information":
-    st.header("Market Information")
-    query = st.text_input("Type company name or ticker (Name or Ticker):", key="query")
-    ticker, company_name = None, None
-    options = []
-    if query:
-        # Get all partial matches for drop down
-        options = tickers_df[
-            (tickers_df["Symbol"].str.upper().str.contains(query.upper())) |
-            (tickers_df["Name"].str.upper().str.contains(query.upper()))
-        ].head(10)[["Symbol", "Name"]].apply(lambda row: f"{row['Name']} ({row['Symbol']})", axis=1).tolist()
-    selected = st.selectbox("Select:", options, key="tickerselect") if options else None
-    if selected:
-        # Parse ticker from select
-        selected_ticker = selected.split("(")[-1].replace(")", "")
-        ticker, company_name = resolve_ticker(selected_ticker)
-    elif query:
-        ticker, company_name = resolve_ticker(query)
-    if ticker:
-        st.subheader(f"{company_name} ({ticker})")
+# --- Shared State for Ticker (for cross-tab use) ---
+if 'selected_symbol' not in st.session_state:
+    st.session_state.selected_symbol = "AAPL"
+
+# ----------- MARKET INFORMATION TAB -----------
+if tab_idx == 0:
+    st.title("Market Information")
+    company_query = st.text_input("Type company name or ticker:")
+    matches = search_tickers(company_query, tickers_df) if company_query else pd.DataFrame()
+    selected_symbol = st.session_state.selected_symbol
+
+    if not matches.empty:
+        symbol = st.selectbox("Choose Ticker:", matches["Symbol"] + " - " + matches["Name"], index=0)
+        if symbol:
+            symbol = symbol.split(" - ")[0]
+            st.session_state.selected_symbol = symbol
+    else:
+        symbol = st.session_state.selected_symbol
+
+    if symbol:
         try:
-            df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-            info = yf.Ticker(ticker).info
-        except Exception as e:
-            df = pd.DataFrame()
-            info = {}
-        if df is not None and not df.empty:
+            name = get_company_name(symbol, tickers_df)
+            st.header(f"{name} ({symbol})")
+            df = get_data(symbol)
+            df = calculate_indicators(df)
+            df = generate_signals(df)
             st.metric("Current Price", f"${df['Close'].iloc[-1]:,.2f}")
-            # Mini chart
+            st.metric("Signal", df['Signal'].iloc[-1])
+            st.metric("Trend", "📈 Bullish" if df['Trend'].iloc[-1]==1 else "📉 Bearish")
+            st.caption("Rationale/Explanation: " + get_signal_explanation(df))
+            st.subheader("7-Day Price Forecast ↪")
+            forecast = forecast_prices(df, symbol)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['Close'],
-                mode='lines', name='Close Price'
-            ))
-            fig.update_layout(title="6-Month Price Trend", height=320)
+            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name='7D Forecast', line_shape='linear'))
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("No price data available for this ticker. Please check the ticker symbol or try another.")
-        # --- Signal and Trend
-        signal, trend, rationale = None, None, ""
-        if df is not None and not df.empty:
-            # Very basic trend/signal
-            if df['Close'].iloc[-1] > df['Close'].iloc[0]:
-                trend = "Bullish"
-            else:
-                trend = "Bearish"
-            pct_change = (df['Close'].iloc[-1] - df['Close'].iloc[0]) / df['Close'].iloc[0] * 100
-            if pct_change > 5:
-                signal = "Buy"
-            elif pct_change < -5:
-                signal = "Sell"
-            else:
-                signal = "Hold"
-            rationale = (
-                f"Signal: {signal} because the price has changed {pct_change:.2f}% over the last 6 months. "
-                f"Trend is {trend} based on overall movement. "
-                "Signals are based on price momentum, not news or fundamentals. Combine with your own research."
-            )
-            st.markdown(f"**Signal:** {signal} &nbsp;&nbsp; **Trend:** {trend}")
-            st.info(rationale)
-        # --- News Section
-        st.markdown("#### Latest News")
-        news = get_news(ticker or company_name)
-        if news:
-            for n in news:
-                st.markdown(f"- [{n['title']}]({n['link']})")
-        else:
-            st.info("No news found for this ticker/company.")
-        # --- Financials Section
-        if info:
-            st.markdown("#### Key Financials")
-            keys = ["marketCap", "trailingPE", "grossProfits", "ebitda", "totalRevenue", "netIncomeToCommon"]
-            renamed = {
-                "marketCap": "Market Cap",
-                "trailingPE": "P/E Ratio",
-                "grossProfits": "Gross Profit",
-                "ebitda": "EBITDA",
-                "totalRevenue": "Total Revenue",
-                "netIncomeToCommon": "Net Income"
-            }
-            for k in keys:
-                v = info.get(k)
-                if v is not None:
-                    if k == "marketCap":
-                        st.write(f"**{renamed[k]}:** ${v:,.0f}")
-                    elif k == "trailingPE":
-                        st.write(f"**{renamed[k]}:** {v:.2f}")
-                    else:
-                        st.write(f"**{renamed[k]}:** ${v:,.0f}")
-        # --- Chart (Annual)
-        try:
-            fin = yf.Ticker(ticker).financials
-            if not fin.empty:
-                st.markdown("#### Annual Financials")
-                st.dataframe(fin)
+            # Financials Chart
+            fin, bal, cash = get_financials(symbol)
+            if fin is not None and not fin.empty:
+                st.subheader("Financial Performance (Annual)")
+                metrics = ["Total Revenue", "Gross Profit", "Ebitda", "Net Income"]
+                fin = fin.T
+                fin.index = fin.index.strftime('%Y')
+                fig2 = go.Figure()
+                for m in metrics:
+                    if m in fin.columns:
+                        fig2.add_trace(go.Scatter(x=fin.index, y=fin[m], name=m, mode='lines+markers'))
+                fig2.update_layout(yaxis_title="USD", xaxis_title="Year")
+                st.plotly_chart(fig2, use_container_width=True)
+            # News Sentiment
+            st.subheader("News Sentiment")
+            news = get_news(symbol, name)
+            for title, link in news:
+                st.markdown(f"- [{title}]({link})")
         except Exception as e:
-            pass
+            st.warning(f"No price data available for this ticker. Please check the ticker symbol or try another. ({e})")
     else:
         st.info("Type a company name and select a valid ticker from the dropdown.")
 
-# ---- Suggestions ----
-elif selected_tab == "Suggestions":
-    st.header("AI Suggestions & News")
-    # Demo: Show sector news for major global sectors
-    sectors = {
-        "AI Sector": ["NVDA", "AMD", "GOOGL", "MSFT", "TSLA", "META", "BIDU"],
-        "Healthcare": ["JNJ", "PFE", "MRK", "RHHBY", "NVS"],
-        "Energy": ["XOM", "CVX", "RDS.A", "BP", "TOT"],
-        "Defense & Aerospace": ["LMT", "RTX", "BA", "NOC"],
-        "Pharma": ["PFE", "NVS", "SNY", "AZN"],
-        "Tech": ["AAPL", "MSFT", "GOOGL", "TSM", "SAMSUNG"],
-        "Finance": ["JPM", "BAC", "WFC", "HSBC", "BNS"],
-        "Nuclear": ["CCJ", "UEC", "DNN", "OROCF"]
+# ----------- SUGGESTIONS TAB -----------
+elif tab_idx == 1:
+    st.title("AI Market Suggestions")
+    ai_sectors = {
+        "AI/Tech": ["NVDA", "SMCI", "AMD", "MSFT", "GOOGL", "AVGO", "ASML", "TSM", "INTC"],
+        "Nuclear": ["BWXT", "SMR", "URA"],
+        "Defense & Aerospace": ["NOC", "LMT", "RTX", "BA", "PLTR", "GD"],
+        "Healthcare": ["UNH", "JNJ", "PFE", "CVS", "MRK"],
+        "Healthcare Tech": ["TDOC", "ISRG", "DOCS", "HCA"],
+        "Pharma & Biotech": ["MRNA", "VRTX", "REGN", "BNTX", "XBI"],
+        "Canadian Market": ["SHOP.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNQ.TO"],
+        "ETFs/Global": ["QQQ", "SPY", "ICLN", "ARKK", "ARKG", "VTI", "EFA", "EWJ"]
     }
-    for sector, tickers in sectors.items():
-        st.markdown(f"### {sector}")
+    st.markdown("#### Companies to Watch")
+    for sector, tickers in ai_sectors.items():
+        st.markdown(f"**{sector}**")
         for t in tickers:
-            tk, name = resolve_ticker(t)
-            nm = name if name else t
-            st.markdown(f"**{nm} ({t})**")
-            news = get_news(t)
-            if news:
-                for n in news:
-                    st.markdown(f"- [{n['title']}]({n['link']})")
-    st.markdown("---")
-    st.markdown("##### Macro Trend News")
-    macro_news = get_macro_news()
-    for n in macro_news:
-        st.markdown(f"- [{n['title']}]({n['link']})")
+            name = get_company_name(t, tickers_df)
+            st.markdown(f"- **{name} ({t})**")
+    st.divider()
+    st.markdown("#### Sector Breaking News / Trend News")
+    sector_news_keywords = ["AI", "Nuclear", "Defense", "Healthcare", "Pharma", "Aerospace", "ETF", "Technology", "Energy", "Canada"]
+    sector_news = get_sector_news(sector_news_keywords)
+    for title, link in sector_news:
+        st.markdown(f"- [{title}]({link})")
+    st.divider()
+    st.markdown("#### Regulatory News (FDA Drug Approvals, etc.)")
+    for title, link in get_fda_approvals():
+        st.markdown(f"- [{title}]({link})")
 
-# ---- Peer Comparison ----
-elif selected_tab == "Peer Comparison":
-    st.header("Peer Comparison")
-    st.info("Peer comparison for global tickers is limited by available free data. For S&P 500 and major stocks, peers will be shown if available.")
-    peer_query = st.text_input("Type company name or ticker for peer comparison:")
-    ticker, company_name = resolve_ticker(peer_query)
-    if ticker:
-        tkr = yf.Ticker(ticker)
-        sector = tkr.info.get("sector")
-        if sector:
-            peer_df = tickers_df[tickers_df["Symbol"] != ticker]
-            sector_peers = peer_df[peer_df["Name"].str.contains(sector, case=False, na=False)]
-            if not sector_peers.empty:
-                st.markdown(f"#### Peers in sector: {sector}")
-                st.dataframe(sector_peers.head(10))
-            else:
-                st.info("No peers found for this ticker/sector in free dataset.")
-        else:
-            st.info("Sector info not available for this ticker.")
-    else:
-        st.info("Enter a company name or ticker above.")
+# ----------- PEER COMPARISON TAB -----------
+elif tab_idx == 2:
+    st.title("Peer Comparison")
+    symbol = st.text_input("Enter Ticker for Peer Comparison:", st.session_state.selected_symbol)
+    if symbol:
+        try:
+            name = get_company_name(symbol, tickers_df)
+            peers = get_peers(symbol)
+            st.markdown(f"##### Peer Companies for {name} ({symbol}):")
+            st.dataframe(peers[["Symbol", "Name"]].reset_index(drop=True))
+            # Show metrics
+            data = []
+            for idx, row in peers.iterrows():
+                try:
+                    ticker = row["Symbol"]
+                    price = yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1]
+                    data.append({"Symbol": ticker, "Name": row["Name"], "Price": price})
+                except:
+                    continue
+            if data:
+                st.table(pd.DataFrame(data))
+        except Exception as e:
+            st.error("Unable to fetch peer data.")
 
-# ---- Watchlist ----
-elif selected_tab == "Watchlist":
-    st.header("Watchlist")
-    # Watchlist is a session_state list
+# ----------- WATCHLIST TAB -----------
+elif tab_idx == 3:
+    st.title("Watchlist")
     if "watchlist" not in st.session_state:
-        st.session_state["watchlist"] = []
-    add_query = st.text_input("Add company (name or ticker):", key="watchadd")
-    add_ticker, add_name = resolve_ticker(add_query)
-    if st.button("Add to Watchlist"):
-        if add_ticker and add_ticker not in st.session_state["watchlist"]:
-            st.session_state["watchlist"].append(add_ticker)
-    if st.session_state["watchlist"]:
-        remove = st.selectbox("Remove from watchlist:", st.session_state["watchlist"])
-        if st.button("Remove"):
-            st.session_state["watchlist"].remove(remove)
-    st.markdown("#### Your Watchlist")
-    for t in st.session_state["watchlist"]:
-        name = resolve_ticker(t)[1]
-        st.markdown(f"- **{name} ({t})**")
-
-# ---- Financial Health ----
-elif selected_tab == "Financial Health":
-    st.header("Financial Health")
-    fh_query = st.text_input("Select company (Name or Ticker):", key="fhquery")
-    ticker, company_name = resolve_ticker(fh_query)
-    if ticker:
-        try:
-            tkr = yf.Ticker(ticker)
-            st.markdown(f"#### {company_name} ({ticker}) - Financial Ratios")
-            st.json(tkr.info)
-            st.markdown("#### Annual Financial Statements")
-            st.dataframe(tkr.financials)
-        except Exception as e:
-            st.error("No financial data found for this ticker.")
-    else:
-        st.info("Enter a company name or ticker above.")
-
-# ---- Options Analytics ----
-elif selected_tab == "Options Analytics":
-    st.header("Options Analytics")
-    st.info("Options data is available for US tickers only due to free data limitations.")
-    op_query = st.text_input("Type ticker (US stocks only):", key="optq")
-    ticker, company_name = resolve_ticker(op_query)
-    if ticker:
-        try:
-            tkr = yf.Ticker(ticker)
-            options = tkr.options
-            if options:
-                st.markdown(f"#### {company_name} ({ticker}) - Options Expiry Dates")
-                st.write(options)
-            else:
-                st.warning("No options data available for this ticker.")
-        except Exception as e:
-            st.error("No options data found for this ticker.")
-    else:
-        st.info("Enter a ticker (US stocks only).")
-
-# ---- Macro Insights ----
-elif selected_tab == "Macro Insights":
-    st.header("Macro Insights")
-    st.markdown("#### Macro Economic News and Indicators")
-    macro_news = get_macro_news()
-    for n in macro_news:
-        st.markdown(f"- [{n['title']}]({n['link']})")
-    st.info("For full macro indicators, see FRED, World Bank, or central bank sites.")
-
-# ---- News Explorer ----
-elif selected_tab == "News Explorer":
-    st.header("News Explorer")
-    news_query = st.text_input("Search news for:")
-    if news_query:
-        news = get_news(news_query)
-        if news:
-            for n in news:
-                st.markdown(f"- [{n['title']}]({n['link']})")
+        st.session_state.watchlist = ["AAPL", "MSFT", "NVDA"]
+    action = st.radio("Action:", ["View", "Add", "Delete"], horizontal=True)
+    if action == "View":
+        if st.session_state.watchlist:
+            for t in st.session_state.watchlist:
+                try:
+                    name = get_company_name(t, tickers_df)
+                    price = yf.Ticker(t).history(period="1d")["Close"].iloc[-1]
+                    st.write(f"**{name} ({t})**: ${price:,.2f}")
+                except:
+                    st.write(f"**{t}**: Data error.")
         else:
-            st.warning("No news found for your search.")
+            st.info("Your watchlist is empty.")
+    elif action == "Add":
+        add_symbol = st.text_input("Add Ticker:")
+        if st.button("Add"):
+            if add_symbol and add_symbol not in st.session_state.watchlist:
+                st.session_state.watchlist.append(add_symbol.upper())
+                st.success(f"Added {add_symbol.upper()} to watchlist.")
+    elif action == "Delete":
+        del_symbol = st.selectbox("Select to Remove:", st.session_state.watchlist)
+        if st.button("Delete"):
+            st.session_state.watchlist.remove(del_symbol)
+            st.success(f"Removed {del_symbol} from watchlist.")
 
-# ---- END OF APP ----
+# ----------- FINANCIAL HEALTH TAB -----------
+elif tab_idx == 4:
+    st.title("Financial Health")
+    symbol = st.text_input("Enter Ticker for Financial Health:", st.session_state.selected_symbol)
+    if symbol:
+        try:
+            name = get_company_name(symbol, tickers_df)
+            st.header(f"{name} ({symbol})")
+            fin, bal, cash = get_financials(symbol)
+            if fin is not None and not fin.empty:
+                st.write("**Income Statement**")
+                st.dataframe(fin)
+            if bal is not None and not bal.empty:
+                st.write("**Balance Sheet**")
+                st.dataframe(bal)
+            if cash is not None and not cash.empty:
+                st.write("**Cash Flow**")
+                st.dataframe(cash)
+            # Key Ratios
+            try:
+                info = yf.Ticker(symbol).info
+                ratios = {
+                    "Market Cap": info.get("marketCap", None),
+                    "Trailing P/E": info.get("trailingPE", None),
+                    "Forward P/E": info.get("forwardPE", None),
+                    "Debt/Equity": info.get("debtToEquity", None),
+                    "ROE": info.get("returnOnEquity", None)
+                }
+                st.write("**Key Ratios**")
+                st.json(ratios)
+            except:
+                pass
+        except Exception as e:
+            st.warning("No financial data found.")
+
+# ----------- OPTIONS ANALYTICS TAB -----------
+elif tab_idx == 5:
+    st.title("Options Analytics")
+    symbol = st.text_input("Enter Ticker for Options Analysis:", st.session_state.selected_symbol)
+    if symbol:
+        calls, puts = get_options_chain(symbol)
+        if calls is not None:
+            st.write("**Calls**")
+            st.dataframe(calls)
+            st.write("**Puts**")
+            st.dataframe(puts)
+            st.write("**AI Trading Strategy Suggestion:**")
+            df = get_data(symbol)
+            df = calculate_indicators(df)
+            df = generate_signals(df)
+            st.info(suggest_trading_strategy(df))
+        else:
+            st.warning("No options data found.")
+
+# ----------- MACRO INSIGHTS TAB -----------
+elif tab_idx == 6:
+    st.title("Macro Insights")
+    st.write("**Major Global Indices:**")
+    indices = get_macro_indices()
+    st.table(pd.DataFrame(indices, columns=["Index", "Symbol", "Latest Price"]))
+    st.write("**Macro News:**")
+    news = get_sector_news(["macro", "economy", "interest rates", "GDP", "inflation"])
+    for title, link in news:
+        st.markdown(f"- [{title}]({link})")
+
+# ----------- NEWS EXPLORER TAB -----------
+elif tab_idx == 7:
+    st.title("News Explorer")
+    st.write("#### Browse Market-Moving News by Keyword, Ticker, or Sector")
+    query = st.text_input("Enter keyword, ticker, or sector:")
+    if query:
+        news = get_sector_news([query])
+        if not news:
+            st.warning("No news found.")
+        for title, link in news:
+            st.markdown(f"- [{title}]({link})")
+    else:
+        st.info("Type a keyword, ticker, or sector above to explore the news.")
+
+# ------ END OF FILE ------
