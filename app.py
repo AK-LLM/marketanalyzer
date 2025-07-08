@@ -10,12 +10,11 @@ import os
 
 st.set_page_config(page_title="Market Terminal", layout="wide")
 
-# Load the tickers CSV
+# ------------- Ticker DB -------------
 @st.cache_data(show_spinner=True)
 def load_ticker_db():
-    # This expects a file called global_tickers.csv in the app directory
     if not os.path.exists("global_tickers.csv"):
-        st.warning("global_tickers.csv file not found. Please download a world company/ticker database and place it in the app directory.")
+        st.warning("Missing 'global_tickers.csv'. Please place it next to app.py.")
         return pd.DataFrame(columns=['symbol', 'name', 'exchange'])
     df = pd.read_csv("global_tickers.csv", dtype=str)
     df = df.dropna(subset=['symbol', 'name'])
@@ -29,17 +28,14 @@ def search_tickers_db(q):
     q = q.strip().upper()
     if not q:
         return []
-    # Match on symbol or name (case insensitive)
-    results = tickers_db[tickers_db.apply(lambda row: q in row['symbol'] or q in row['name'].upper(), axis=1)]
-    # Show up to 20 matches
+    results = tickers_db[tickers_db.apply(
+        lambda row: q in row['symbol'] or q in row['name'].upper(), axis=1)]
     return results[['symbol', 'name', 'exchange']].head(20).to_dict("records")
 
 def resolve_symbol(q):
-    # Try exact symbol first
     df = tickers_db[tickers_db['symbol'] == q.upper()]
     if not df.empty:
         return df.iloc[0]['symbol'], df.iloc[0]['name'], df.iloc[0]['exchange']
-    # Try fuzzy search
     results = search_tickers_db(q)
     if results:
         return results[0]['symbol'], results[0]['name'], results[0]['exchange']
@@ -60,7 +56,7 @@ def get_data(symbol, period='1y'):
     try:
         data = yf.download(symbol, period=period, auto_adjust=True, progress=False)
         if data.empty or 'Close' not in data.columns:
-            raise ValueError("No price data available for this ticker.")
+            return pd.DataFrame()
         return data
     except Exception as e:
         return pd.DataFrame()
@@ -94,8 +90,7 @@ def forecast_prices(df, days=7):
     forecast = model.predict(future)
     return forecast[['ds', 'yhat']].tail(days)
 
-def get_news(symbol, n=5):
-    # Google Finance News
+def get_news(symbol, n=7):
     url = f"https://news.google.com/search?q={symbol}+stock"
     try:
         html = requests.get(url, timeout=5).text
@@ -110,28 +105,22 @@ def get_news(symbol, n=5):
     except:
         return [("No news found.", "")]
 
+# ========== Tabs ==========
+
 def show_market_info():
     st.header("Market Information")
-    query = st.text_input("Type company name or ticker (Name or Ticker):", "")
-    options = []
-    selected = ""
-    if query:
-        options = search_tickers_db(query)
-        if options:
-            selected = st.selectbox("Select:", [f"{x['name']} ({x['symbol']}) [{x['exchange']}]" for x in options])
-        else:
-            selected = ""
-    symbol = ""
-    name = ""
-    exchange = ""
-    if selected:
-        idx = [i for i, x in enumerate(options) if f"{x['name']} ({x['symbol']}) [{x['exchange']}]" == selected]
-        if idx:
-            symbol, name, exchange = options[idx[0]]['symbol'], options[idx[0]]['name'], options[idx[0]]['exchange']
+    query = st.text_input("Type company name or ticker:", "")
+    options = search_tickers_db(query) if query else []
+    symbol, name, exchange = "", "", ""
+    if options:
+        labels = [f"{x['name']} ({x['symbol']}) [{x['exchange']}]" for x in options]
+        sel = st.selectbox("Select:", labels)
+        idx = labels.index(sel)
+        symbol, name, exchange = options[idx]['symbol'], options[idx]['name'], options[idx]['exchange']
     elif query:
         symbol, name, exchange = resolve_symbol(query)
     if symbol:
-        st.subheader(f"{name.upper()} ({symbol.upper()})")
+        st.subheader(f"{name} ({symbol})")
         data = get_data(symbol)
         if data.empty:
             st.warning("No price data available for this ticker. Please check the ticker symbol or try another.")
@@ -158,7 +147,6 @@ def show_market_info():
 
 def show_suggestions():
     st.header("AI Suggestions & News")
-    # Example: sector-sorted, you can expand this as needed
     ai_sectors = {
         "AI": ["NVDA", "MSFT", "GOOGL", "AMD", "TSLA", "AVGO", "SMCI"],
         "Healthcare": ["JNJ", "PFE", "MRK", "UNH", "RHHBY"],
@@ -183,30 +171,50 @@ def show_suggestions():
 
 def peer_comparison_tab():
     st.header("Peer Comparison")
-    st.write("Peer company analysis coming soon.")
+    st.info("Peer comparison is under development for global tickers.")
 
 def watchlist_tab():
     st.header("Watchlist")
-    st.info("Watchlist functionality coming soon. (Will support add/remove for selected tickers.)")
+    if 'watchlist' not in st.session_state:
+        st.session_state['watchlist'] = []
+    addq = st.text_input("Add to Watchlist (company name or ticker):", "")
+    if st.button("Add", key="add_watch"):
+        symbol, name, exch = resolve_symbol(addq)
+        if symbol and symbol not in st.session_state['watchlist']:
+            st.session_state['watchlist'].append(symbol)
+    if st.session_state['watchlist']:
+        for sym in st.session_state['watchlist']:
+            n = get_company_name(sym)
+            col1, col2 = st.columns([4,1])
+            with col1:
+                st.write(f"{n} ({sym})")
+            with col2:
+                if st.button("Remove", key=f"rm_{sym}"):
+                    st.session_state['watchlist'].remove(sym)
+    else:
+        st.info("No companies in watchlist.")
 
 def financial_health_tab():
     st.header("Financial Health")
-    st.info("Balance sheet, PnL, ratios, and analytics coming soon.")
+    st.info("Financial ratios and statements are being expanded for global tickers.")
 
 def options_analytics_tab():
     st.header("Options Analytics")
-    st.info("Global options analytics coming soon (US only for now, global support if free data available).")
+    st.info("Options analytics (global) will be added as free data becomes available.")
 
 def macro_insights_tab():
     st.header("Macro Insights")
-    st.info("Global macro indicators coming soon.")
+    st.info("Macro indicators coming soon (will include major central banks, FX, indices).")
 
 def news_explorer_tab():
     st.header("News Explorer")
-    st.info("Search and browse sector and market news.")
+    q = st.text_input("Search news for company, market, or sector:", "")
+    if q:
+        for title, url in get_news(q):
+            st.write(f"- [{title}]({url})")
+    else:
+        st.info("Type a keyword, ticker, or company to see related news.")
 
-# -----------------
-# Main navigation
 tabs = {
     "Market Information": show_market_info,
     "Suggestions": show_suggestions,
@@ -219,4 +227,3 @@ tabs = {
 }
 selection = st.sidebar.radio("Navigation", list(tabs.keys()), index=0)
 tabs[selection]()
-
